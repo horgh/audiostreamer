@@ -170,7 +170,7 @@ __open_input(const char * const input_format_name, const char * const input_url,
 	}
 
 	// Set decoder attributes (channels, sample rate, etc). I think we could set
-	// these manually, but copy from the input stream.
+	// these manually, but I copy from the input stream.
 	if (avcodec_parameters_to_context(input->codec_ctx,
 				input->format_ctx->streams[0]->codecpar) < 0) {
 		printf("unable to initialize input codec parameters\n");
@@ -178,8 +178,8 @@ __open_input(const char * const input_format_name, const char * const input_url,
 		return NULL;
 	}
 
-	// Initialize the codec context to use the codec.
-	// This is needed even though we passed the codec to avcodec_alloc_context3().
+	// Initialize the codec context to use the codec. This is needed even though
+	// we passed the codec to avcodec_alloc_context3().
 	if (avcodec_open2(input->codec_ctx, input_codec, NULL) != 0) {
 		printf("unable to initialize codec context\n");
 		__destroy_input(input);
@@ -455,41 +455,39 @@ __decode_and_store_frame(const struct Input * const input,
 		return -1;
 	}
 
-	// AVPacket holds encoded data.
+	// Read an encoded frame as a packet.
 	AVPacket input_pkt;
 	memset(&input_pkt, 0, sizeof(AVPacket));
 
-	// Read an encoded frame as a packet.
 	if (av_read_frame(input->format_ctx, &input_pkt) != 0) {
 		printf("unable to read frame\n");
-		// This happens at EOF.
+		// EOF.
 		return 0;
 	}
 
-	// Decode the packet. Send it to the input's decoder.
+
+	// Send encoded packet to the input's decoder.
 	if (avcodec_send_packet(input->codec_ctx, &input_pkt) != 0) {
 		printf("send_packet failed\n");
 		av_packet_unref(&input_pkt);
 		return -1;
 	}
 
-	// AVFrame holds decoded data.
+	av_packet_unref(&input_pkt);
+
+
+	// Get decoded data out as a frame.
 	AVFrame * input_frame = av_frame_alloc();
 	if (!input_frame) {
 		printf("av_frame_alloc\n");
-		av_packet_unref(&input_pkt);
 		return -1;
 	}
 
-	// Get decoded data out as a frame.
 	if (avcodec_receive_frame(input->codec_ctx, input_frame) != 0) {
 		printf("avcodec_receive_frame failed\n");
-		av_packet_unref(&input_pkt);
 		av_frame_free(&input_frame);
 		return -1;
 	}
-
-	av_packet_unref(&input_pkt);
 
 
 	// Convert the samples
@@ -543,7 +541,6 @@ __decode_and_store_frame(const struct Input * const input,
 		return -1;
 	}
 
-	// av_frame_free unrefs the frame too.
 	av_frame_free(&input_frame);
 	free(converted_input_samples);
 
