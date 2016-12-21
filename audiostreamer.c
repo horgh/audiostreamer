@@ -1,94 +1,45 @@
 //
+// Read PulseAudio input and encode to MP3.
 //
 
 #include <errno.h>
-//#include <libavcodec/audio_frame_queue.h>
 #include <libavcodec/avcodec.h>
 #include <libavdevice/avdevice.h>
 #include <libavformat/avformat.h>
 #include <libavutil/audio_fifo.h>
 #include <libswresample/swresample.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+
+struct Input {
+	AVFormatContext * format_ctx;
+	AVCodecContext * codec_ctx;
+};
+
+static void
+__setup(void);
+static struct Input *
+__open_input(const char * const, const char * const,
+		bool);
+static void
+__destroy_input(struct Input * const);
 
 int
 main(void)
 {
-	// Set up library.
-
-	// Register muxers, demuxers, and protocols.
-	av_register_all();
-
-	// Make formats available. Specifically, pulse (pulseaudio).
-	avdevice_register_all();
+	__setup();
 
 
-	// Open input and set up decoder.
+	// Open input and decoder.
 
 	// PulseAudio input format.
-	AVInputFormat * input_format = av_find_input_format("pulse");
-	if (!input_format) {
-		printf("input format not found\n");
-		return 1;
-	}
-
-	// Input URL.
+	const char * const input_format = "pulse";
 	const char * const input_url
 		= "alsa_output.pci-0000_00_1f.3.analog-stereo.monitor";
-
-	// Open the input stream.
-	AVFormatContext * input_format_ctx = NULL;
-	if (avformat_open_input(&input_format_ctx, input_url, input_format,
-				NULL) != 0) {
-		printf("open input failed\n");
-		avformat_free_context(input_format_ctx);
-		return 1;
-	}
-
-	// Read packets to get stream info.
-	if (avformat_find_stream_info(input_format_ctx, NULL) < 0) {
-		printf("failed to find stream info\n");
-		avformat_close_input(&input_format_ctx);
-		avformat_free_context(input_format_ctx);
-		return 1;
-	}
-
-	// Dump info about the input format.
-	av_dump_format(input_format_ctx, 0, input_url, 0);
-
-	// Find codec for the input stream.
-	AVCodec * input_codec = avcodec_find_decoder(
-			input_format_ctx->streams[0]->codecpar->codec_id);
-	if (!input_codec) {
-		printf("codec not found\n");
-		return 1;
-	}
-
-	AVCodecContext * input_codec_ctx = avcodec_alloc_context3(input_codec);
-	if (!input_codec_ctx) {
-		printf("could not allocate codec context\n");
-		return 1;
-	}
-
-	// Apparently we need to set some attributes manually
-	// http://stackoverflow.com/questions/39461643/avcodec-open2-pcm-channels-out-of-bounds
-	// TODO: Confirm what these values should be.
-	//input_codec_ctx->sample_rate = 8000;
-	//input_codec_ctx->sample_fmt = AV_SAMPLE_FMT_S16;
-	//input_codec_ctx->channels = 2;
-	//input_codec_ctx->channel_layout = AV_CH_LAYOUT_STEREO;
-
-	if (avcodec_parameters_to_context(input_codec_ctx,
-				input_format_ctx->streams[0]->codecpar) < 0) {
-		printf("unable to initialize input codec parameters\n");
-		return 1;
-	}
-
-	// Initialize the codec context to use the codec.
-	if (avcodec_open2(input_codec_ctx, input_codec, NULL) != 0) {
-		printf("unable to initialize codec context\n");
-		return 1;
-	}
+	const bool verbose = true;
+	struct Input * const input = __open_input(input_format, input_url, verbose);
 
 
 	// Input is open and decoder is ready. Now set up output and output encoder
@@ -135,7 +86,7 @@ main(void)
 		return 1;
 	}
 
-	avs->time_base.den = input_codec_ctx->sample_rate;
+	avs->time_base.den = input->codec_ctx->sample_rate;
 	avs->time_base.num = 1;
 
 	printf("added stream\n");
@@ -148,9 +99,9 @@ main(void)
 		return 1;
 	}
 
-	output_codec_ctx->channels       = input_codec_ctx->channels;
+	output_codec_ctx->channels       = input->codec_ctx->channels;
 	output_codec_ctx->channel_layout = AV_CH_LAYOUT_STEREO;
-	output_codec_ctx->sample_rate    = input_codec_ctx->sample_rate;
+	output_codec_ctx->sample_rate    = input->codec_ctx->sample_rate;
 	output_codec_ctx->sample_fmt     = output_codec->sample_fmts[0];
 	//output_codec_ctx->sample_fmt     = output_codec->sample_fmts[2];
 	output_codec_ctx->bit_rate = 96000;
@@ -218,9 +169,9 @@ main(void)
 			av_get_default_channel_layout(output_codec_ctx->channels),
 			output_codec_ctx->sample_fmt,
 			output_codec_ctx->sample_rate,
-			av_get_default_channel_layout(input_codec_ctx->channels),
-			input_codec_ctx->sample_fmt,
-			input_codec_ctx->sample_rate,
+			av_get_default_channel_layout(input->codec_ctx->channels),
+			input->codec_ctx->sample_fmt,
+			input->codec_ctx->sample_rate,
 			0,
 			NULL);
 	if (!resample_ctx) {
@@ -231,11 +182,6 @@ main(void)
 	if (swr_init(resample_ctx) < 0) {
 		printf("unable to open resample context\n");
 		return 1;
-	}
-
-	// Apparently this being different can cause issues. See transcode_aac.c
-	if (output_codec_ctx->sample_rate != input_codec_ctx->sample_rate) {
-		printf("sample rate differs\n");
 	}
 
 
@@ -300,7 +246,7 @@ main(void)
 		const int available_samples = av_audio_fifo_size(af);
 		if (available_samples < output_codec_ctx->frame_size) {
 			// Read an encoded frame as a packet.
-			if (av_read_frame(input_format_ctx, &input_pkt) != 0) {
+			if (av_read_frame(input->format_ctx, &input_pkt) != 0) {
 				printf("unable to read frame\n");
 				// This happens at EOF.
 				break;
@@ -309,20 +255,18 @@ main(void)
 			printf("read packet\n");
 
 			// Decode the packet.
-			if (avcodec_send_packet(input_codec_ctx, &input_pkt) != 0) {
-				printf("send_packet_failed\n");
+			if (avcodec_send_packet(input->codec_ctx, &input_pkt) != 0) {
+				printf("send_packet failed\n");
 				return 1;
 			}
 
 			// Get decoded data out as a frame.
-			if (avcodec_receive_frame(input_codec_ctx, input_frame) != 0) {
+			if (avcodec_receive_frame(input->codec_ctx, input_frame) != 0) {
 				printf("avcodec_receive_frame failed\n");
 				return 1;
 			}
 
 			av_packet_unref(&input_pkt);
-
-			printf("input_frame has %d samples\n", input_frame->nb_samples);
 
 
 			// Convert the samples
@@ -381,7 +325,6 @@ main(void)
 			}
 
 
-
 			// Add frame's samples to the fifo.
 
 			// Resize fifo so it can contain old and new samples.
@@ -391,9 +334,6 @@ main(void)
 				return 1;
 			}
 
-			// Note: I had segfault here prior to trying any resampling. May be index
-			// 1 in extended_data being null.
-			//if (av_audio_fifo_write(af, (void * *) input_frame->extended_data,
 			if (av_audio_fifo_write(af, (void * *) converted_input_samples,
 						input_frame->nb_samples) != input_frame->nb_samples) {
 				printf("could not write all samples to fifo\n");
@@ -484,9 +424,115 @@ main(void)
 		return 1;
 	}
 
-	avformat_close_input(&input_format_ctx);
-	avformat_free_context(input_format_ctx);
+	__destroy_input(input);
 	av_frame_free(&input_frame);
 
 	return 0;
+}
+
+static void
+__setup(void)
+{
+	// Set up library.
+
+	// Register muxers, demuxers, and protocols.
+	av_register_all();
+
+	// Make formats available. Specifically, pulse (pulseaudio).
+	avdevice_register_all();
+}
+
+// Open input and set up decoder.
+static struct Input *
+__open_input(const char * const input_format_name, const char * const input_url,
+		bool verbose)
+{
+	struct Input * const input = calloc(1, sizeof(struct Input));
+	if (!input) {
+		printf("%s\n", strerror(errno));
+		return NULL;
+	}
+
+	// Find the format.
+	AVInputFormat * input_format = av_find_input_format(input_format_name);
+	if (!input_format) {
+		printf("input format not found\n");
+		__destroy_input(input);
+		return NULL;
+	}
+
+	// Open the input stream.
+	if (avformat_open_input(&input->format_ctx, input_url, input_format,
+				NULL) != 0) {
+		printf("open input failed\n");
+		__destroy_input(input);
+		return NULL;
+	}
+
+	// Read packets to get stream info.
+	if (avformat_find_stream_info(input->format_ctx, NULL) < 0) {
+		printf("failed to find stream info\n");
+		__destroy_input(input);
+		return NULL;
+	}
+
+	// Dump info about the input format.
+	if (verbose) {
+		av_dump_format(input->format_ctx, 0, input_url, 0);
+	}
+
+	// Find codec for the input stream.
+	AVCodec * input_codec = avcodec_find_decoder(
+			input->format_ctx->streams[0]->codecpar->codec_id);
+	if (!input_codec) {
+		printf("codec not found\n");
+		__destroy_input(input);
+		return NULL;
+	}
+
+	// Set up decoding context (demuxer).
+	input->codec_ctx = avcodec_alloc_context3(input_codec);
+	if (!input->codec_ctx) {
+		printf("could not allocate codec context\n");
+		__destroy_input(input);
+		return NULL;
+	}
+
+	// Set decoder attributes (channels, sample rate, etc). I think we could set
+	// these manually, but copy from the input stream.
+	if (avcodec_parameters_to_context(input->codec_ctx,
+				input->format_ctx->streams[0]->codecpar) < 0) {
+		printf("unable to initialize input codec parameters\n");
+		__destroy_input(input);
+		return NULL;
+	}
+
+	// Initialize the codec context to use the codec.
+	// This is needed even though we passed the codec to avcodec_alloc_context3().
+	if (avcodec_open2(input->codec_ctx, input_codec, NULL) != 0) {
+		printf("unable to initialize codec context\n");
+		__destroy_input(input);
+		return NULL;
+	}
+
+	return input;
+}
+
+static void
+__destroy_input(struct Input * const input)
+{
+	if (!input) {
+		return;
+	}
+
+	if (input->format_ctx) {
+		avformat_close_input(&input->format_ctx);
+		avformat_free_context(input->format_ctx);
+	}
+
+	if (input->codec_ctx) {
+		avcodec_free_context(&input->codec_ctx);
+	}
+
+	free(input);
 }
