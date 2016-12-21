@@ -37,6 +37,12 @@ __open_output(const struct Input * const,
 		const char * const);
 static void
 __destroy_output(struct Output * const);
+static bool
+__read_write_loop(const struct Input * const,
+		const struct Output * const);
+static int
+__read_decode_and_store_frame(const struct Input * const,
+		const struct Output * const, AVAudioFifo * const);
 
 int
 main(void)
@@ -67,205 +73,19 @@ main(void)
 	}
 
 
-	// Begin read, decode, encode, write process.
+	// Read, decode, encode, write loop.
 
-	// We repeatedly read in data (av_read_frame()). This gives us an AVPacket
-	// with encoded data. We decode each packet with avcodec_send_packet(). Then
-	// we get the decoded data out using avcodec_receive_frame().
-
-	// Writing: avformat_write_header() to write the file header, then
-	// av_write_frame() repeatedly to write each encoded packet, and finally
-	// av_write_trailer() to finalize the file.
-	//
-	// For some more info on this, read top explanatory comment in avcodec.h.
-	// avformat.h also has some information.
-
-	// AVPacket holds encoded data.
-	AVPacket input_pkt;
-	memset(&input_pkt, 0, sizeof(AVPacket));
-
-	// AVFrame holds decoded data.
-	AVFrame * input_frame = av_frame_alloc();
-	if (!input_frame) {
-		printf("av_frame_alloc\n");
+	if (!__read_write_loop(input, output)) {
+		__destroy_input(input);
+		__destroy_output(output);
 		return 1;
 	}
 
-	// Encode to this packet.
-	AVPacket output_pkt;
-	memset(&output_pkt, 0, sizeof(AVPacket));
 
-	// The number of samples read in a frame can be larger or smaller than what
-	// the encoder wants. We need to give it the exact number of frames it wants.
-	//
-	// This means we can't simply feed a single frame from the input directly to
-	// the encoder at a time.
-	//
-	// We use a AvAudioFifo for this. Note AudioFrameQueue looks like something
-	// similar but is apparently not available in my version of ffmpeg. Also, it
-	// appears to not hold raw data either, so I'm not sure how to use it.
-
-	// We must have initial allocation size of at least 1.
-	AVAudioFifo * af = av_audio_fifo_alloc(output->codec_ctx->sample_fmt,
-			output->codec_ctx->channels, 1);
-	if (!af) {
-		printf("unable to allocate audio fifo\n");
-		return 1;
-	}
-
-	int frames_written = 0;
-
-	// Global presentation timestamp (PTS). This needs to increase for each sample
-	// we output.
-	int64_t pts = 1;
-
-	while (1) {
-		// Do we need to read & decode another frame from the input?
-		const int available_samples = av_audio_fifo_size(af);
-		if (available_samples < output->codec_ctx->frame_size) {
-			// Read an encoded frame as a packet.
-			if (av_read_frame(input->format_ctx, &input_pkt) != 0) {
-				printf("unable to read frame\n");
-				// This happens at EOF.
-				break;
-			}
-
-			// Decode the packet.
-			if (avcodec_send_packet(input->codec_ctx, &input_pkt) != 0) {
-				printf("send_packet failed\n");
-				return 1;
-			}
-
-			// Get decoded data out as a frame.
-			if (avcodec_receive_frame(input->codec_ctx, input_frame) != 0) {
-				printf("avcodec_receive_frame failed\n");
-				return 1;
-			}
-
-			av_packet_unref(&input_pkt);
-
-
-			// Convert the samples
-
-			uint8_t * * converted_input_samples = calloc(
-					(size_t) output->codec_ctx->channels, sizeof(uint8_t *));
-			if (!converted_input_samples) {
-				printf("%s\n", strerror(errno));
-				return 1;
-			}
-
-			if (av_samples_alloc(converted_input_samples, NULL,
-						output->codec_ctx->channels, input_frame->nb_samples,
-						output->codec_ctx->sample_fmt, 0) < 0) {
-				printf("av_samples_alloc\n");
-				return 1;
-			}
-
-			if (swr_convert(output->resample_ctx, converted_input_samples,
-						input_frame->nb_samples,
-						(uint8_t * *) input_frame->extended_data,
-						//input_data,
-						//raw_input_samples,
-						input_frame->nb_samples) < 0) {
-				printf("swr_convert\n");
-				return 1;
-			}
-
-
-			// Add frame's samples to the fifo.
-
-			// Resize fifo so it can contain old and new samples.
-			if (av_audio_fifo_realloc(af,
-						av_audio_fifo_size(af)+input_frame->nb_samples) != 0) {
-				printf("unable to resize fifo\n");
-				return 1;
-			}
-
-			if (av_audio_fifo_write(af, (void * *) converted_input_samples,
-						input_frame->nb_samples) != input_frame->nb_samples) {
-				printf("could not write all samples to fifo\n");
-				return 1;
-			}
-
-			av_frame_unref(input_frame);
-			continue;
-		}
-
-		// We have enough samples to encode and write.
-
-		// Get frame out of fifo.
-
-		// Encode with this frame.
-		AVFrame * output_frame = av_frame_alloc();
-		if (!output_frame) {
-			printf("unable to allocate output frame\n");
-			return 1;
-		}
-
-		output_frame->nb_samples     = output->codec_ctx->frame_size;
-		output_frame->channel_layout = output->codec_ctx->channel_layout;
-		output_frame->format         = output->codec_ctx->sample_fmt;
-		output_frame->sample_rate    = output->codec_ctx->sample_rate;
-
-		if (av_frame_get_buffer(output_frame, 0) < 0) {
-			printf("unable to allocate output frame buffer\n");
-			return 1;
-		}
-
-		if (av_audio_fifo_read(af, (void * *) output_frame->data,
-					output->codec_ctx->frame_size) < output->codec_ctx->frame_size) {
-				printf("short read from fifo\n");
-				return 1;
-		}
-
-		output_frame->pts = pts;
-		pts += output_frame->nb_samples;
-
-		// Send the raw frame to the encoder.
-		int error = avcodec_send_frame(output->codec_ctx, output_frame);
-		if (error != 0) {
-			char buf[255];
-			av_strerror(error, buf, sizeof(buf));
-			printf("avcodec_send_frame failed: %s\n", buf);
-			return 1;
-		}
-
-		av_frame_unref(output_frame);
-		printf("sent raw frame to output encoder\n");
-
-		// Read encoded data from the encoder.
-		// Get encoded data out as a packet.
-		error = avcodec_receive_packet(output->codec_ctx, &output_pkt);
-		if (error != 0) {
-			if (error == AVERROR(EAGAIN)) {
-				printf("EAGAIN\n");
-				continue;
-			}
-
-			char buf[255];
-			av_strerror(error, buf, sizeof(buf));
-			printf("avcodec_receive_packet failed: %s\n", buf);
-			return 1;
-		}
-
-		// Then write encoded data packet out using av_write_frame()
-		if (av_write_frame(output->format_ctx, &output_pkt) < 0) {
-			printf("av_write_frame failed\n");
-			return 1;
-		}
-
-		av_packet_unref(&output_pkt);
-
-		frames_written++;
-
-		if (frames_written == 600) {
-			break;
-		}
-	}
+	// Clean up.
 
 	__destroy_input(input);
 	__destroy_output(output);
-	av_frame_free(&input_frame);
 
 	return 0;
 }
@@ -540,4 +360,262 @@ __destroy_output(struct Output * const output)
 	}
 
 	free(output);
+}
+
+// Begin read, decode, encode, write process.
+//
+// We repeatedly read in data (av_read_frame()). This gives us an AVPacket with
+// encoded data. We decode each packet with avcodec_send_packet(). Then we get
+// the decoded data out using avcodec_receive_frame().
+//
+// Writing: avformat_write_header() to write the file header, then
+// av_write_frame() repeatedly to write each encoded packet, and finally
+// av_write_trailer() to finalize the file.
+//
+// For some more info on this, read top explanatory comment in avcodec.h.
+// avformat.h also has some information.
+static bool
+__read_write_loop(const struct Input * const input,
+		const struct Output * const output)
+{
+	if (!input || !output) {
+		printf("%s\n", strerror(EINVAL));
+		return false;
+	}
+
+	// Encode to this packet.
+	AVPacket output_pkt;
+	memset(&output_pkt, 0, sizeof(AVPacket));
+
+	// The number of samples read in a frame can be larger or smaller than what
+	// the encoder wants. We need to give it the exact number of frames it wants.
+	//
+	// This means we can't simply feed a single frame at a time from the input to
+	// the encoder.
+	//
+	// We use a AvAudioFifo for buffering. Note AudioFrameQueue looks like
+	// something similar but is apparently not available in my version of ffmpeg.
+	// Also, it appears to not hold raw data either, so I'm not sure how to use
+	// it.
+
+	// We must have an initial allocation size of at least 1.
+	AVAudioFifo * af = av_audio_fifo_alloc(output->codec_ctx->sample_fmt,
+			output->codec_ctx->channels, 1);
+	if (!af) {
+		printf("unable to allocate audio fifo\n");
+		return false;
+		return 1;
+	}
+
+	int frames_written = 0;
+
+	// Global presentation timestamp (PTS). This needs to increase for each sample
+	// we output.
+	int64_t pts = 1;
+
+	while (1) {
+		// Find how many samples are in the FIFO.
+		const int available_samples = av_audio_fifo_size(af);
+
+		// Do we need to read & decode another frame from the input?
+		if (available_samples < output->codec_ctx->frame_size) {
+			const int read_res = __read_decode_and_store_frame(input, output, af);
+			if (read_res == -1) {
+				av_audio_fifo_free(af);
+				return false;
+			}
+
+			if (read_res == 0) {
+				break;
+			}
+
+			continue;
+		}
+
+		// We have enough samples to encode and write.
+
+		// Get frame out of fifo.
+
+		// Encode with this frame.
+		AVFrame * output_frame = av_frame_alloc();
+		if (!output_frame) {
+			printf("unable to allocate output frame\n");
+			return 1;
+		}
+
+		output_frame->nb_samples     = output->codec_ctx->frame_size;
+		output_frame->channel_layout = output->codec_ctx->channel_layout;
+		output_frame->format         = output->codec_ctx->sample_fmt;
+		output_frame->sample_rate    = output->codec_ctx->sample_rate;
+
+		if (av_frame_get_buffer(output_frame, 0) < 0) {
+			printf("unable to allocate output frame buffer\n");
+			return 1;
+		}
+
+		if (av_audio_fifo_read(af, (void * *) output_frame->data,
+					output->codec_ctx->frame_size) < output->codec_ctx->frame_size) {
+				printf("short read from fifo\n");
+				return 1;
+		}
+
+		output_frame->pts = pts;
+		pts += output_frame->nb_samples;
+
+		// Send the raw frame to the encoder.
+		int error = avcodec_send_frame(output->codec_ctx, output_frame);
+		if (error != 0) {
+			char buf[255];
+			av_strerror(error, buf, sizeof(buf));
+			printf("avcodec_send_frame failed: %s\n", buf);
+			return 1;
+		}
+
+		av_frame_unref(output_frame);
+		printf("sent raw frame to output encoder\n");
+
+		// Read encoded data from the encoder.
+		// Get encoded data out as a packet.
+		error = avcodec_receive_packet(output->codec_ctx, &output_pkt);
+		if (error != 0) {
+			if (error == AVERROR(EAGAIN)) {
+				printf("EAGAIN\n");
+				continue;
+			}
+
+			char buf[255];
+			av_strerror(error, buf, sizeof(buf));
+			printf("avcodec_receive_packet failed: %s\n", buf);
+			return 1;
+		}
+
+		// Then write encoded data packet out using av_write_frame()
+		if (av_write_frame(output->format_ctx, &output_pkt) < 0) {
+			printf("av_write_frame failed\n");
+			return 1;
+		}
+
+		av_packet_unref(&output_pkt);
+
+		frames_written++;
+
+		if (frames_written == 600) {
+			break;
+		}
+
+	}
+
+	av_audio_fifo_free(af);
+	return true;
+}
+
+// Read an encoded frame (packet) from the input. Decode it (frame). Store the
+// frame's samples into the FIFO.
+//
+// Returns:
+// 1 if read a frame
+// 0 if EOF
+// -1 if error
+static int
+__read_decode_and_store_frame(const struct Input * const input,
+		const struct Output * const output, AVAudioFifo * const af)
+{
+	if (!input || !af) {
+		printf("%s\n", strerror(EINVAL));
+		return -1;
+	}
+
+	// AVPacket holds encoded data.
+	AVPacket input_pkt;
+	memset(&input_pkt, 0, sizeof(AVPacket));
+
+	// Read an encoded frame as a packet.
+	if (av_read_frame(input->format_ctx, &input_pkt) != 0) {
+		printf("unable to read frame\n");
+		// This happens at EOF.
+		return 0;
+	}
+
+	// Decode the packet. Send it to the input's decoder.
+	if (avcodec_send_packet(input->codec_ctx, &input_pkt) != 0) {
+		printf("send_packet failed\n");
+		av_packet_unref(&input_pkt);
+		return -1;
+	}
+
+	// AVFrame holds decoded data.
+	AVFrame * input_frame = av_frame_alloc();
+	if (!input_frame) {
+		printf("av_frame_alloc\n");
+		av_packet_unref(&input_pkt);
+		return -1;
+	}
+
+	// Get decoded data out as a frame.
+	if (avcodec_receive_frame(input->codec_ctx, input_frame) != 0) {
+		printf("avcodec_receive_frame failed\n");
+		av_packet_unref(&input_pkt);
+		av_frame_free(&input_frame);
+		return -1;
+	}
+
+	av_packet_unref(&input_pkt);
+
+
+	// Convert the samples
+
+	uint8_t * * converted_input_samples = calloc(
+			(size_t) output->codec_ctx->channels, sizeof(uint8_t *));
+	if (!converted_input_samples) {
+		printf("%s\n", strerror(errno));
+		av_frame_free(&input_frame);
+		return -1;
+	}
+
+	if (av_samples_alloc(converted_input_samples, NULL,
+				output->codec_ctx->channels, input_frame->nb_samples,
+				output->codec_ctx->sample_fmt, 0) < 0) {
+		printf("av_samples_alloc\n");
+		av_frame_free(&input_frame);
+		free(converted_input_samples);
+		return -1;
+	}
+
+	if (swr_convert(output->resample_ctx, converted_input_samples,
+				input_frame->nb_samples,
+				(uint8_t * *) input_frame->extended_data,
+				//input_data,
+				//raw_input_samples,
+				input_frame->nb_samples) < 0) {
+		printf("swr_convert\n");
+		av_frame_free(&input_frame);
+		free(converted_input_samples);
+		return -1;
+	}
+
+
+	// Add the samples to the fifo.
+
+	// Resize fifo so it can contain old and new samples.
+	if (av_audio_fifo_realloc(af,
+				av_audio_fifo_size(af)+input_frame->nb_samples) != 0) {
+		printf("unable to resize fifo\n");
+		av_frame_free(&input_frame);
+		free(converted_input_samples);
+		return -1;
+	}
+
+	if (av_audio_fifo_write(af, (void * *) converted_input_samples,
+				input_frame->nb_samples) != input_frame->nb_samples) {
+		printf("could not write all samples to fifo\n");
+		av_frame_free(&input_frame);
+		free(converted_input_samples);
+		return -1;
+	}
+
+	// av_frame_free unrefs the frame too.
+	av_frame_free(&input_frame);
+	free(converted_input_samples);
+
+	return 1;
 }
