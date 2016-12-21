@@ -261,9 +261,7 @@ __open_output(const struct Input * const input,
 
 	// There is a codec member in the stream, but it's deprecated and says we
 	// should use its codecpar member instead.
-	// TODO: Should we pass output_codec?
-	//AVStream * avs = avformat_new_stream(output->format_ctx, output_codec);
-	AVStream * avs = avformat_new_stream(output->format_ctx, NULL);
+	AVStream * avs = avformat_new_stream(output->format_ctx, output_codec);
 	if (!avs) {
 		printf("unable to add stream\n");
 		__destroy_output(output);
