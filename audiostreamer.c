@@ -41,8 +41,13 @@ static bool
 __read_write_loop(const struct Input * const,
 		const struct Output * const);
 static int
-__read_decode_and_store_frame(const struct Input * const,
+__decode_and_store_frame(const struct Input * const,
 		const struct Output * const, AVAudioFifo * const);
+static bool
+__encode_and_write_frame(const struct Output * const,
+		AVAudioFifo * const, int64_t * const);
+static char *
+__get_error_string(const int);
 
 int
 main(void)
@@ -383,10 +388,6 @@ __read_write_loop(const struct Input * const input,
 		return false;
 	}
 
-	// Encode to this packet.
-	AVPacket output_pkt;
-	memset(&output_pkt, 0, sizeof(AVPacket));
-
 	// The number of samples read in a frame can be larger or smaller than what
 	// the encoder wants. We need to give it the exact number of frames it wants.
 	//
@@ -404,13 +405,10 @@ __read_write_loop(const struct Input * const input,
 	if (!af) {
 		printf("unable to allocate audio fifo\n");
 		return false;
-		return 1;
 	}
 
-	int frames_written = 0;
-
-	// Global presentation timestamp (PTS). This needs to increase for each sample
-	// we output.
+	// Presentation timestamp (PTS). This needs to increase for each sample we
+	// output.
 	int64_t pts = 1;
 
 	while (1) {
@@ -419,7 +417,7 @@ __read_write_loop(const struct Input * const input,
 
 		// Do we need to read & decode another frame from the input?
 		if (available_samples < output->codec_ctx->frame_size) {
-			const int read_res = __read_decode_and_store_frame(input, output, af);
+			const int read_res = __decode_and_store_frame(input, output, af);
 			if (read_res == -1) {
 				av_audio_fifo_free(af);
 				return false;
@@ -433,76 +431,10 @@ __read_write_loop(const struct Input * const input,
 		}
 
 		// We have enough samples to encode and write.
-
-		// Get frame out of fifo.
-
-		// Encode with this frame.
-		AVFrame * output_frame = av_frame_alloc();
-		if (!output_frame) {
-			printf("unable to allocate output frame\n");
-			return 1;
+		if (!__encode_and_write_frame(output, af, &pts)) {
+			av_audio_fifo_free(af);
+			return false;
 		}
-
-		output_frame->nb_samples     = output->codec_ctx->frame_size;
-		output_frame->channel_layout = output->codec_ctx->channel_layout;
-		output_frame->format         = output->codec_ctx->sample_fmt;
-		output_frame->sample_rate    = output->codec_ctx->sample_rate;
-
-		if (av_frame_get_buffer(output_frame, 0) < 0) {
-			printf("unable to allocate output frame buffer\n");
-			return 1;
-		}
-
-		if (av_audio_fifo_read(af, (void * *) output_frame->data,
-					output->codec_ctx->frame_size) < output->codec_ctx->frame_size) {
-				printf("short read from fifo\n");
-				return 1;
-		}
-
-		output_frame->pts = pts;
-		pts += output_frame->nb_samples;
-
-		// Send the raw frame to the encoder.
-		int error = avcodec_send_frame(output->codec_ctx, output_frame);
-		if (error != 0) {
-			char buf[255];
-			av_strerror(error, buf, sizeof(buf));
-			printf("avcodec_send_frame failed: %s\n", buf);
-			return 1;
-		}
-
-		av_frame_unref(output_frame);
-		printf("sent raw frame to output encoder\n");
-
-		// Read encoded data from the encoder.
-		// Get encoded data out as a packet.
-		error = avcodec_receive_packet(output->codec_ctx, &output_pkt);
-		if (error != 0) {
-			if (error == AVERROR(EAGAIN)) {
-				printf("EAGAIN\n");
-				continue;
-			}
-
-			char buf[255];
-			av_strerror(error, buf, sizeof(buf));
-			printf("avcodec_receive_packet failed: %s\n", buf);
-			return 1;
-		}
-
-		// Then write encoded data packet out using av_write_frame()
-		if (av_write_frame(output->format_ctx, &output_pkt) < 0) {
-			printf("av_write_frame failed\n");
-			return 1;
-		}
-
-		av_packet_unref(&output_pkt);
-
-		frames_written++;
-
-		if (frames_written == 600) {
-			break;
-		}
-
 	}
 
 	av_audio_fifo_free(af);
@@ -517,7 +449,7 @@ __read_write_loop(const struct Input * const input,
 // 0 if EOF
 // -1 if error
 static int
-__read_decode_and_store_frame(const struct Input * const input,
+__decode_and_store_frame(const struct Input * const input,
 		const struct Output * const output, AVAudioFifo * const af)
 {
 	if (!input || !af) {
@@ -618,4 +550,103 @@ __read_decode_and_store_frame(const struct Input * const input,
 	free(converted_input_samples);
 
 	return 1;
+}
+
+// Take samples from the FIFO, encode them, and write them to the encoder. We
+// try to pull out a fully encoded frame from the encoder, which may or may not
+// succeed, depending on whether there is sufficient data present. If there is,
+// we write the frame to the output.
+//
+// We update the pts.
+static bool
+__encode_and_write_frame(const struct Output * const output,
+		AVAudioFifo * const af, int64_t * const pts)
+{
+	if (!output || !af || !pts) {
+		printf("%s\n", strerror(EINVAL));
+		return false;
+	}
+
+	// Get frame out of fifo.
+
+	AVFrame * output_frame = av_frame_alloc();
+	if (!output_frame) {
+		printf("unable to allocate output frame\n");
+		return false;
+	}
+
+	output_frame->nb_samples     = output->codec_ctx->frame_size;
+	output_frame->channel_layout = output->codec_ctx->channel_layout;
+	output_frame->format         = output->codec_ctx->sample_fmt;
+	output_frame->sample_rate    = output->codec_ctx->sample_rate;
+
+	if (av_frame_get_buffer(output_frame, 0) < 0) {
+		printf("unable to allocate output frame buffer\n");
+		av_frame_free(&output_frame);
+		return false;
+	}
+
+	if (av_audio_fifo_read(af, (void * *) output_frame->data,
+				output->codec_ctx->frame_size) < output->codec_ctx->frame_size) {
+		printf("short read from fifo\n");
+		av_frame_free(&output_frame);
+		return false;
+	}
+
+	output_frame->pts = *pts;
+	*pts += output_frame->nb_samples;
+
+
+	// Send the raw frame to the encoder.
+	int error = avcodec_send_frame(output->codec_ctx, output_frame);
+	if (error != 0) {
+		printf("avcodec_send_frame failed: %s\n", __get_error_string(error));
+		av_frame_free(&output_frame);
+		return false;
+	}
+
+	av_frame_free(&output_frame);
+
+
+	// Read encoded data from the encoder.
+
+	AVPacket output_pkt;
+	memset(&output_pkt, 0, sizeof(AVPacket));
+
+	error = avcodec_receive_packet(output->codec_ctx, &output_pkt);
+	if (error != 0) {
+		// We expect that we will not always have enough data to get a fully encoded
+		// frame out.
+		if (error == AVERROR(EAGAIN)) {
+			return true;
+		}
+
+		printf("avcodec_receive_packet failed: %s\n", __get_error_string(error));
+		return false;
+	}
+
+
+	// Write encoded data packet out using av_write_frame().
+	if (av_write_frame(output->format_ctx, &output_pkt) < 0) {
+		printf("av_write_frame failed\n");
+		av_packet_unref(&output_pkt);
+		return false;
+	}
+
+	av_packet_unref(&output_pkt);
+	return true;
+}
+
+// Take an error code from the ffmpeg libraries and translate it into a string.
+//
+// Do not free the returned buffer.
+static char *
+__get_error_string(const int error)
+{
+	static char buf[255];
+	memset(buf, 0, 255);
+
+	av_strerror(error, buf, 255);
+
+	return buf;
 }
