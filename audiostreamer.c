@@ -125,37 +125,8 @@ main(void)
 		return 1;
 	}
 
-	// Initialize the codec context to use the codec.
-	//if (avcodec_open2(output_codec_ctx, output_codec, NULL) != 0) {
-	//	printf("unable to initialize output codec context to use codec\n");
-	//	return 1;
-	//}
-
 	if (avformat_write_header(output_format_ctx, NULL) < 0) {
 		printf("unable to write header\n");
-		return 1;
-	}
-
-	if (!avcodec_is_open(output_codec_ctx)) {
-		printf("codec is not open\n");
-		return 1;
-	}
-
-	if (!av_codec_is_encoder(output_codec_ctx->codec)) {
-		printf("codec is not an encoder\n");
-		return 1;
-	}
-
-	if (output_codec_ctx->codec->receive_packet) {
-		printf("output codec context codec receive packet is set\n");
-	}
-
-	if (output_codec_ctx->codec_type == AVMEDIA_TYPE_VIDEO) {
-		printf("output codec type is video\n");
-	} else if (output_codec_ctx->codec_type == AVMEDIA_TYPE_AUDIO) {
-		printf("output codec type is audio \n");
-	} else {
-		printf("unknown output codec type\n");
 		return 1;
 	}
 
@@ -237,10 +208,6 @@ main(void)
 	// we output.
 	int64_t pts = 1;
 
-	// output_codec_context->frame_size tells us how many samples the output
-	// encoder takes.
-	printf("output codec frame size %d\n", output_codec_ctx->frame_size);
-
 	while (1) {
 		// Do we need to read & decode another frame from the input?
 		const int available_samples = av_audio_fifo_size(af);
@@ -251,8 +218,6 @@ main(void)
 				// This happens at EOF.
 				break;
 			}
-
-			printf("read packet\n");
 
 			// Decode the packet.
 			if (avcodec_send_packet(input->codec_ctx, &input_pkt) != 0) {
@@ -284,35 +249,6 @@ main(void)
 				printf("av_samples_alloc\n");
 				return 1;
 			}
-
-			//// swr_convert() wants input to be const uint8_t * *... Copy so that is
-			//// the case.
-			//const uint8_t * * raw_input_samples = calloc(
-			//		(size_t) output_codec_ctx->channels, sizeof(uint8_t *));
-			//if (!raw_input_samples) {
-			//	printf("%s\n", strerror(errno));
-			//	return 1;
-			//}
-
-			//if (av_samples_alloc((uint8_t * *) raw_input_samples, NULL,
-			//			output_codec_ctx->channels, input_frame->nb_samples,
-			//			output_codec_ctx->sample_fmt, 0) < 0) {
-			//	printf("av_samples_alloc\n");
-			//	return 1;
-			//}
-
-			//if (av_samples_copy(raw_input_samples, input_frame->extended_data,
-			//			0, 0, input_frame->nb_samples, output_codec_ctx->channels,
-			//			output_codec_ctx->sample_fmt) < 0) {
-			//	printf("av_samples_copy\n");
-			//	return 1;
-			//}
-
-
-			//const uint8_t * const * const input_data0 = (const uint8_t * const * const) input_frame->extended_data;
-			//const uint8_t * const * input_data1 = input_data0;
-			//const uint8_t * * input_data = (const uint8_t * *) input_data1;
-			//const uint8_t * * input_data = (const uint8_t * *) input_frame->extended_data;
 
 			if (swr_convert(resample_ctx, converted_input_samples,
 						input_frame->nb_samples,
@@ -366,7 +302,6 @@ main(void)
 		}
 
 		if (av_audio_fifo_read(af, (void * *) output_frame->data,
-		//if (av_audio_fifo_read(af, (void * *) output_frame->extended_data,
 					output_codec_ctx->frame_size) < output_codec_ctx->frame_size) {
 				printf("short read from fifo\n");
 				return 1;
@@ -391,7 +326,6 @@ main(void)
 		// Get encoded data out as a packet.
 		error = avcodec_receive_packet(output_codec_ctx, &output_pkt);
 		if (error != 0) {
-			// Argh, I thought it was sending EINVAL for some reason.
 			if (error == AVERROR(EAGAIN)) {
 				printf("EAGAIN\n");
 				continue;
@@ -399,7 +333,6 @@ main(void)
 
 			char buf[255];
 			av_strerror(error, buf, sizeof(buf));
-			// EINVAL means: codec not opened, or encoder error
 			printf("avcodec_receive_packet failed: %s\n", buf);
 			return 1;
 		}
