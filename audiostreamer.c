@@ -18,6 +18,12 @@ struct Input {
 	AVCodecContext * codec_ctx;
 };
 
+struct Output {
+	AVFormatContext * format_ctx;
+	AVCodecContext * codec_ctx;
+	SwrContext * resample_ctx;
+};
+
 static void
 __setup(void);
 static struct Input *
@@ -25,6 +31,12 @@ __open_input(const char * const, const char * const,
 		bool);
 static void
 __destroy_input(struct Input * const);
+static struct Output *
+__open_output(const struct Input * const,
+		const char * const, const char * const,
+		const char * const);
+static void
+__destroy_output(struct Output * const);
 
 int
 main(void)
@@ -40,118 +52,17 @@ main(void)
 		= "alsa_output.pci-0000_00_1f.3.analog-stereo.monitor";
 	const bool verbose = true;
 	struct Input * const input = __open_input(input_format, input_url, verbose);
-
-
-	// Input is open and decoder is ready. Now set up output and output encoder
-	// (muxer).
-
-	// Set up muxing context.
-	// AVFormatContext is used for muxing (as well as demuxing).
-	// In addition to allocating the context, this sets up the output format which
-	// sets which muxer to use.
-	AVFormatContext * output_format_ctx = NULL;
-	const char * const output_fmt = "mp3";
-	//const char * const output_fmt = "oga";
-	if (avformat_alloc_output_context2(&output_format_ctx, NULL, output_fmt,
-				NULL) < 0) {
-		printf("unable to allocate AVFormatContext\n");
-		return 1;
-	}
-
-	// Open IO context - open output file.
-	// stdout
-	//const char * const output_url = "pipe:1";
-	const char * const output_url = "file:out.mp3";
-	if (avio_open(&output_format_ctx->pb, output_url, AVIO_FLAG_WRITE) < 0) {
-		printf("unable to open output\n");
-		return 1;
-	}
-
-	// Create output stream.
-
-	const char * const output_encoder = "libmp3lame";
-	//const char * const output_encoder = "libvorbis";
-	AVCodec * output_codec = avcodec_find_encoder_by_name(output_encoder);
-	if (!output_codec) {
-		printf("output codec not found\n");
-		return 1;
-	}
-
-	// There is a codec member in the stream, but it's deprecated and says we
-	// should use its codecpar member instead.
-	//AVStream * avs = avformat_new_stream(output_format_ctx, output_codec);
-	AVStream * avs = avformat_new_stream(output_format_ctx, NULL);
-	if (!avs) {
-		printf("unable to add stream\n");
-		return 1;
-	}
-
-	avs->time_base.den = input->codec_ctx->sample_rate;
-	avs->time_base.num = 1;
-
-	printf("added stream\n");
-
-	// Set up output encoder
-
-	AVCodecContext * output_codec_ctx = avcodec_alloc_context3(output_codec);
-	if (!output_codec_ctx) {
-		printf("unable to allocate output codec context\n");
-		return 1;
-	}
-
-	output_codec_ctx->channels       = input->codec_ctx->channels;
-	output_codec_ctx->channel_layout = AV_CH_LAYOUT_STEREO;
-	output_codec_ctx->sample_rate    = input->codec_ctx->sample_rate;
-	output_codec_ctx->sample_fmt     = output_codec->sample_fmts[0];
-	//output_codec_ctx->sample_fmt     = output_codec->sample_fmts[2];
-	output_codec_ctx->bit_rate = 96000;
-
-	//if (avcodec_parameters_to_context(output_codec_ctx, avs->codecpar) < 0) {
-	//	printf("unable to initialize output codec parameters\n");
-	//	return 1;
-	//}
-
-	printf("output codec ctx %d channels\n", output_codec_ctx->channels);
-
-	// Initialize the codec context to use the codec.
-	if (avcodec_open2(output_codec_ctx, output_codec, NULL) != 0) {
-		printf("unable to initialize output codec context to use codec\n");
-		return 1;
-	}
-
-	// Set AVStream.codecpar (stream codec parameters).
-	if (avcodec_parameters_from_context(avs->codecpar, output_codec_ctx) < 0) {
-		printf("unable to set output codec parameters\n");
-		return 1;
-	}
-
-	if (avformat_write_header(output_format_ctx, NULL) < 0) {
-		printf("unable to write header\n");
+	if (!input) {
 		return 1;
 	}
 
 
-	// Set up resampler
+	// Open output and encoder.
 
-	// To be able to convert audio sample formats, we need a resampler.
-	// See transcode_aac.c
-	SwrContext * resample_ctx = swr_alloc_set_opts(
-			NULL,
-			av_get_default_channel_layout(output_codec_ctx->channels),
-			output_codec_ctx->sample_fmt,
-			output_codec_ctx->sample_rate,
-			av_get_default_channel_layout(input->codec_ctx->channels),
-			input->codec_ctx->sample_fmt,
-			input->codec_ctx->sample_rate,
-			0,
-			NULL);
-	if (!resample_ctx) {
-		printf("unable to allocate resample context\n");
-		return 1;
-	}
-
-	if (swr_init(resample_ctx) < 0) {
-		printf("unable to open resample context\n");
+	struct Output * const output = __open_output(input, "mp3", "out.mp3",
+			"libmp3lame");
+	if (!output) {
+		__destroy_input(input);
 		return 1;
 	}
 
@@ -195,8 +106,8 @@ main(void)
 	// appears to not hold raw data either, so I'm not sure how to use it.
 
 	// We must have initial allocation size of at least 1.
-	AVAudioFifo * af = av_audio_fifo_alloc(output_codec_ctx->sample_fmt,
-			output_codec_ctx->channels, 1);
+	AVAudioFifo * af = av_audio_fifo_alloc(output->codec_ctx->sample_fmt,
+			output->codec_ctx->channels, 1);
 	if (!af) {
 		printf("unable to allocate audio fifo\n");
 		return 1;
@@ -211,7 +122,7 @@ main(void)
 	while (1) {
 		// Do we need to read & decode another frame from the input?
 		const int available_samples = av_audio_fifo_size(af);
-		if (available_samples < output_codec_ctx->frame_size) {
+		if (available_samples < output->codec_ctx->frame_size) {
 			// Read an encoded frame as a packet.
 			if (av_read_frame(input->format_ctx, &input_pkt) != 0) {
 				printf("unable to read frame\n");
@@ -237,20 +148,20 @@ main(void)
 			// Convert the samples
 
 			uint8_t * * converted_input_samples = calloc(
-					(size_t) output_codec_ctx->channels, sizeof(uint8_t *));
+					(size_t) output->codec_ctx->channels, sizeof(uint8_t *));
 			if (!converted_input_samples) {
 				printf("%s\n", strerror(errno));
 				return 1;
 			}
 
 			if (av_samples_alloc(converted_input_samples, NULL,
-						output_codec_ctx->channels, input_frame->nb_samples,
-						output_codec_ctx->sample_fmt, 0) < 0) {
+						output->codec_ctx->channels, input_frame->nb_samples,
+						output->codec_ctx->sample_fmt, 0) < 0) {
 				printf("av_samples_alloc\n");
 				return 1;
 			}
 
-			if (swr_convert(resample_ctx, converted_input_samples,
+			if (swr_convert(output->resample_ctx, converted_input_samples,
 						input_frame->nb_samples,
 						(uint8_t * *) input_frame->extended_data,
 						//input_data,
@@ -291,10 +202,10 @@ main(void)
 			return 1;
 		}
 
-		output_frame->nb_samples     = output_codec_ctx->frame_size;
-		output_frame->channel_layout = output_codec_ctx->channel_layout;
-		output_frame->format         = output_codec_ctx->sample_fmt;
-		output_frame->sample_rate    = output_codec_ctx->sample_rate;
+		output_frame->nb_samples     = output->codec_ctx->frame_size;
+		output_frame->channel_layout = output->codec_ctx->channel_layout;
+		output_frame->format         = output->codec_ctx->sample_fmt;
+		output_frame->sample_rate    = output->codec_ctx->sample_rate;
 
 		if (av_frame_get_buffer(output_frame, 0) < 0) {
 			printf("unable to allocate output frame buffer\n");
@@ -302,7 +213,7 @@ main(void)
 		}
 
 		if (av_audio_fifo_read(af, (void * *) output_frame->data,
-					output_codec_ctx->frame_size) < output_codec_ctx->frame_size) {
+					output->codec_ctx->frame_size) < output->codec_ctx->frame_size) {
 				printf("short read from fifo\n");
 				return 1;
 		}
@@ -311,7 +222,7 @@ main(void)
 		pts += output_frame->nb_samples;
 
 		// Send the raw frame to the encoder.
-		int error = avcodec_send_frame(output_codec_ctx, output_frame);
+		int error = avcodec_send_frame(output->codec_ctx, output_frame);
 		if (error != 0) {
 			char buf[255];
 			av_strerror(error, buf, sizeof(buf));
@@ -324,7 +235,7 @@ main(void)
 
 		// Read encoded data from the encoder.
 		// Get encoded data out as a packet.
-		error = avcodec_receive_packet(output_codec_ctx, &output_pkt);
+		error = avcodec_receive_packet(output->codec_ctx, &output_pkt);
 		if (error != 0) {
 			if (error == AVERROR(EAGAIN)) {
 				printf("EAGAIN\n");
@@ -338,7 +249,7 @@ main(void)
 		}
 
 		// Then write encoded data packet out using av_write_frame()
-		if (av_write_frame(output_format_ctx, &output_pkt) < 0) {
+		if (av_write_frame(output->format_ctx, &output_pkt) < 0) {
 			printf("av_write_frame failed\n");
 			return 1;
 		}
@@ -352,12 +263,8 @@ main(void)
 		}
 	}
 
-	if (av_write_trailer(output_format_ctx) != 0) {
-		printf("unable to write trailer\n");
-		return 1;
-	}
-
 	__destroy_input(input);
+	__destroy_output(output);
 	av_frame_free(&input_frame);
 
 	return 0;
@@ -380,6 +287,12 @@ static struct Input *
 __open_input(const char * const input_format_name, const char * const input_url,
 		bool verbose)
 {
+	if (!input_format_name || strlen(input_format_name) == 0 ||
+			!input_url || strlen(input_url) == 0) {
+		printf("%s\n", strerror(EINVAL));
+		return NULL;
+	}
+
 	struct Input * const input = calloc(1, sizeof(struct Input));
 	if (!input) {
 		printf("%s\n", strerror(errno));
@@ -468,4 +381,163 @@ __destroy_input(struct Input * const input)
 	}
 
 	free(input);
+}
+
+// Open output and set up encoder.
+//
+// output_url: For stdout use 'pipe:1'. For output to a file use 'file:out.mp3'
+// (to name the file out.mp3).
+static struct Output *
+__open_output(const struct Input * const input,
+		const char * const output_format, const char * const output_url,
+		const char * const output_encoder)
+{
+	if (!output_format || strlen(output_format) == 0 ||
+			!output_url || strlen(output_url) == 0 ||
+			!output_encoder || strlen(output_encoder) == 0) {
+		printf("%s\n", strerror(EINVAL));
+		return NULL;
+	}
+
+	struct Output * const output = calloc(1, sizeof(struct Output));
+	if (!output) {
+		printf("%s\n", strerror(errno));
+		return NULL;
+	}
+
+	// Set up muxing context.
+	// AVFormatContext is used for muxing (as well as demuxing).
+	// In addition to allocating the context, this sets up the output format which
+	// sets which muxer to use.
+	if (avformat_alloc_output_context2(&output->format_ctx, NULL, output_format,
+				NULL) < 0) {
+		printf("unable to allocate AVFormatContext\n");
+		__destroy_output(output);
+		return NULL;
+	}
+
+
+	// Open IO context - open output file.
+	if (avio_open(&output->format_ctx->pb, output_url, AVIO_FLAG_WRITE) < 0) {
+		printf("unable to open output\n");
+		__destroy_output(output);
+		return NULL;
+	}
+
+
+	// Create output stream.
+
+	AVCodec * output_codec = avcodec_find_encoder_by_name(output_encoder);
+	if (!output_codec) {
+		printf("output codec not found\n");
+		__destroy_output(output);
+		return NULL;
+	}
+
+	// There is a codec member in the stream, but it's deprecated and says we
+	// should use its codecpar member instead.
+	// TODO: Should we pass output_codec?
+	//AVStream * avs = avformat_new_stream(output->format_ctx, output_codec);
+	AVStream * avs = avformat_new_stream(output->format_ctx, NULL);
+	if (!avs) {
+		printf("unable to add stream\n");
+		__destroy_output(output);
+		return NULL;
+	}
+
+	avs->time_base.den = input->codec_ctx->sample_rate;
+	avs->time_base.num = 1;
+
+
+	// Set up output encoder
+
+	output->codec_ctx = avcodec_alloc_context3(output_codec);
+	if (!output->codec_ctx) {
+		printf("unable to allocate output codec context\n");
+		__destroy_output(output);
+		return NULL;
+	}
+
+	output->codec_ctx->channels       = input->codec_ctx->channels;
+	output->codec_ctx->channel_layout = AV_CH_LAYOUT_STEREO;
+	output->codec_ctx->sample_rate    = input->codec_ctx->sample_rate;
+	output->codec_ctx->sample_fmt     = output_codec->sample_fmts[0];
+	// 96 Kb/s
+	output->codec_ctx->bit_rate       = 96000;
+
+	// Initialize the codec context to use the codec.
+	if (avcodec_open2(output->codec_ctx, output_codec, NULL) != 0) {
+		printf("unable to initialize output codec context to use codec\n");
+		__destroy_output(output);
+		return NULL;
+	}
+
+	// Set AVStream.codecpar (stream codec parameters).
+	if (avcodec_parameters_from_context(avs->codecpar, output->codec_ctx) < 0) {
+		printf("unable to set output codec parameters\n");
+		__destroy_output(output);
+		return NULL;
+	}
+
+	// Write file header
+	if (avformat_write_header(output->format_ctx, NULL) < 0) {
+		printf("unable to write header\n");
+		__destroy_output(output);
+		return NULL;
+	}
+
+
+	// Set up resampler. To be able to convert audio sample formats, we need a
+	// resampler. See transcode_aac.c
+
+	output->resample_ctx = swr_alloc_set_opts(
+			NULL,
+			av_get_default_channel_layout(output->codec_ctx->channels),
+			output->codec_ctx->sample_fmt,
+			output->codec_ctx->sample_rate,
+			av_get_default_channel_layout(input->codec_ctx->channels),
+			input->codec_ctx->sample_fmt,
+			input->codec_ctx->sample_rate,
+			0,
+			NULL);
+	if (!output->resample_ctx) {
+		printf("unable to allocate resample context\n");
+		__destroy_output(output);
+		return NULL;
+	}
+
+	if (swr_init(output->resample_ctx) < 0) {
+		printf("unable to open resample context\n");
+		__destroy_output(output);
+		return NULL;
+	}
+
+	return output;
+}
+
+static void
+__destroy_output(struct Output * const output)
+{
+	if (!output) {
+		return;
+	}
+
+	if (output->format_ctx) {
+		// Write file trailer.
+		if (av_write_trailer(output->format_ctx) != 0) {
+			printf("unable to write trailer\n");
+		}
+
+		avformat_free_context(output->format_ctx);
+	}
+
+	if (output->codec_ctx) {
+		avcodec_free_context(&output->codec_ctx);
+	}
+
+	if (output->resample_ctx) {
+		swr_free(&output->resample_ctx);
+	}
+
+	free(output);
 }
