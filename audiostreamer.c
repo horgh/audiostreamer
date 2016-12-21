@@ -128,7 +128,7 @@ __open_input(const char * const input_format_name, const char * const input_url,
 	}
 
 	// Find the format.
-	AVInputFormat * input_format = av_find_input_format(input_format_name);
+	AVInputFormat * const input_format = av_find_input_format(input_format_name);
 	if (!input_format) {
 		printf("input format not found\n");
 		__destroy_input(input);
@@ -156,7 +156,7 @@ __open_input(const char * const input_format_name, const char * const input_url,
 	}
 
 	// Find codec for the input stream.
-	AVCodec * input_codec = avcodec_find_decoder(
+	AVCodec * const input_codec = avcodec_find_decoder(
 			input->format_ctx->streams[0]->codecpar->codec_id);
 	if (!input_codec) {
 		printf("codec not found\n");
@@ -255,7 +255,7 @@ __open_output(const struct Input * const input,
 
 	// Create output stream.
 
-	AVCodec * output_codec = avcodec_find_encoder_by_name(output_encoder);
+	AVCodec * const output_codec = avcodec_find_encoder_by_name(output_encoder);
 	if (!output_codec) {
 		printf("output codec not found\n");
 		__destroy_output(output);
@@ -409,7 +409,7 @@ __read_write_loop(const struct Input * const input,
 	// it.
 
 	// We must have an initial allocation size of at least 1.
-	AVAudioFifo * af = av_audio_fifo_alloc(output->codec_ctx->sample_fmt,
+	AVAudioFifo * const af = av_audio_fifo_alloc(output->codec_ctx->sample_fmt,
 			output->codec_ctx->channels, 1);
 	if (!af) {
 		printf("unable to allocate audio fifo\n");
@@ -514,14 +514,14 @@ __decode_and_store_frame(const struct Input * const input,
 
 	// Convert the samples
 
-	const uint8_t * * raw_samples = __copy_samples(input_frame->extended_data,
-			output->codec_ctx->channels);
+	const uint8_t * * const raw_samples = __copy_samples(
+			input_frame->extended_data, output->codec_ctx->channels);
 	if (!raw_samples) {
 		av_frame_free(&input_frame);
 		return -1;
 	}
 
-	uint8_t * * converted_input_samples = calloc(
+	uint8_t * * const converted_input_samples = calloc(
 			(size_t) output->codec_ctx->channels, sizeof(uint8_t *));
 	if (!converted_input_samples) {
 		printf("%s\n", strerror(errno));
