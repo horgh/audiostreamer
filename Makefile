@@ -43,12 +43,7 @@ CFLAGS = \
 	-Wnested-externs \
 	-Winline \
 	-Winvalid-pch \
-	-Wstack-protector \
-	-Wno-incompatible-pointer-types
-
-# XXX: I'm using -Wno-incompatible-pointer types because of the
-#   const uint8_t * * on swr_convert()'s input parameter. Probably there's a
-#   way to resolve that.
+	-Wstack-protector
 
 TARGETS=audiostreamer
 

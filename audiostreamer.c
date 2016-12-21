@@ -43,6 +43,8 @@ __read_write_loop(const struct Input * const,
 static int
 __decode_and_store_frame(const struct Input * const,
 		const struct Output * const, AVAudioFifo * const);
+static const uint8_t * *
+__copy_samples(uint8_t * * const, const int);
 static int
 __encode_and_write_frame(const struct Output * const,
 		AVAudioFifo * const, int64_t * const);
@@ -512,11 +514,19 @@ __decode_and_store_frame(const struct Input * const input,
 
 	// Convert the samples
 
+	const uint8_t * * raw_samples = __copy_samples(input_frame->extended_data,
+			output->codec_ctx->channels);
+	if (!raw_samples) {
+		av_frame_free(&input_frame);
+		return -1;
+	}
+
 	uint8_t * * converted_input_samples = calloc(
 			(size_t) output->codec_ctx->channels, sizeof(uint8_t *));
 	if (!converted_input_samples) {
 		printf("%s\n", strerror(errno));
 		av_frame_free(&input_frame);
+		free(raw_samples);
 		return -1;
 	}
 
@@ -526,21 +536,21 @@ __decode_and_store_frame(const struct Input * const input,
 		printf("av_samples_alloc\n");
 		av_frame_free(&input_frame);
 		free(converted_input_samples);
+		free(raw_samples);
 		return -1;
 	}
 
 	if (swr_convert(output->resample_ctx, converted_input_samples,
-				input_frame->nb_samples,
-				(uint8_t * *) input_frame->extended_data,
-				//input_data,
-				//raw_input_samples,
-				input_frame->nb_samples) < 0) {
+				input_frame->nb_samples, raw_samples, input_frame->nb_samples) < 0) {
 		printf("swr_convert\n");
 		av_frame_free(&input_frame);
+		free(raw_samples);
 		av_freep(&converted_input_samples[0]);
 		free(converted_input_samples);
 		return -1;
 	}
+
+	free(raw_samples);
 
 
 	// Add the samples to the fifo.
@@ -569,6 +579,29 @@ __decode_and_store_frame(const struct Input * const input,
 	free(converted_input_samples);
 
 	return 1;
+}
+
+// Turn uint8_t * * samples into const uint8_t * * samples. Because for input
+// samples, that is what swr_convert() wants as a parameter.
+static const uint8_t * *
+__copy_samples(uint8_t * * const src, const int nb_channels)
+{
+	if (!src) {
+		printf("%s\n", strerror(EINVAL));
+		return NULL;
+	}
+
+	const uint8_t * * const dst = calloc((size_t) nb_channels, sizeof(uint8_t *));
+	if (!dst) {
+		printf("%s\n", strerror(errno));
+		return NULL;
+	}
+
+	for (int i = 0; i < nb_channels; i++) {
+		dst[i] = src[i];
+	}
+
+	return dst;
 }
 
 // Take samples from the FIFO, encode them, and write them to the encoder. We
