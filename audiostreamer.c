@@ -397,16 +397,19 @@ __read_write_loop(const struct Input * const input,
 		return false;
 	}
 
-	// The number of samples read in a frame can be larger or smaller than what
-	// the encoder wants. We need to give it the exact number of frames it wants.
+	// The number of samples read in a frame from the input can be larger or
+	// smaller than what the encoder wants. We need to give it the exact number
+	// it wants. This means we can't reliably feed a single frame at a time from
+	// the input into the output.
 	//
-	// This means we can't simply feed a single frame at a time from the input to
-	// the encoder.
+	// To make it possible to always feed the expected number of samples to the
+	// encoder, we use a AvAudioFifo for buffering samples. We read and decode
+	// samples from the input, and add them to the FIFO queue. When we have
+	// enough, we extract, encode, and write them to the output.
 	//
-	// We use a AvAudioFifo for buffering. Note AudioFrameQueue looks like
-	// something similar but is apparently not available in my version of ffmpeg.
-	// Also, it appears to not hold raw data either, so I'm not sure how to use
-	// it.
+	// Note AudioFrameQueue looks like something similar to AvAudioFifo, but is
+	// apparently not available in my version of ffmpeg. Also, it appears to not
+	// hold raw data either, so I'm not sure it is applicable.
 
 	// We must have an initial allocation size of at least 1.
 	AVAudioFifo * const af = av_audio_fifo_alloc(output->codec_ctx->sample_fmt,
@@ -442,6 +445,7 @@ __read_write_loop(const struct Input * const input,
 		}
 
 		// We have enough samples to encode and write.
+
 		const int write_res = __encode_and_write_frame(output, af, &pts);
 		if (write_res == -1) {
 			av_audio_fifo_free(af);
