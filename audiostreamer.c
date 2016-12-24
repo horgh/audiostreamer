@@ -1,7 +1,4 @@
-//
-// Read PulseAudio input and encode to MP3.
-//
-
+#include "audiostreamer.h"
 #include <errno.h>
 #include <libavcodec/avcodec.h>
 #include <libavdevice/avdevice.h>
@@ -13,33 +10,6 @@
 #include <stdio.h>
 #include <string.h>
 
-struct Input {
-	AVFormatContext * format_ctx;
-	AVCodecContext * codec_ctx;
-};
-
-struct Output {
-	AVFormatContext * format_ctx;
-	AVCodecContext * codec_ctx;
-	SwrContext * resample_ctx;
-};
-
-static void
-__setup(void);
-static struct Input *
-__open_input(const char * const, const char * const,
-		const bool);
-static void
-__destroy_input(struct Input * const);
-static struct Output *
-__open_output(const struct Input * const,
-		const char * const, const char * const,
-		const char * const);
-static void
-__destroy_output(struct Output * const);
-static bool
-__read_write_loop(const struct Input * const,
-		const struct Output * const, const int);
 static int
 __decode_and_store_frame(const struct Input * const,
 		const struct Output * const, AVAudioFifo * const);
@@ -51,55 +21,8 @@ __encode_and_write_frame(const struct Output * const,
 static char *
 __get_error_string(const int);
 
-int
-main(void)
-{
-	__setup();
-
-
-	// Open input and decoder.
-
-	// PulseAudio input format.
-	const char * const input_format = "pulse";
-	const char * const input_url
-		= "alsa_output.pci-0000_00_1f.3.analog-stereo.monitor";
-	const bool verbose = true;
-	struct Input * const input = __open_input(input_format, input_url, verbose);
-	if (!input) {
-		return 1;
-	}
-
-
-	// Open output and encoder.
-
-	struct Output * const output = __open_output(input, "mp3", "file:out.mp3",
-			"libmp3lame");
-	if (!output) {
-		__destroy_input(input);
-		return 1;
-	}
-
-
-	// Read, decode, encode, write loop.
-
-	const int max_frames = 100;
-	if (!__read_write_loop(input, output, max_frames)) {
-		__destroy_input(input);
-		__destroy_output(output);
-		return 1;
-	}
-
-
-	// Clean up.
-
-	__destroy_input(input);
-	__destroy_output(output);
-
-	return 0;
-}
-
-static void
-__setup(void)
+void
+as_setup(void)
 {
 	// Set up library.
 
@@ -111,8 +34,8 @@ __setup(void)
 }
 
 // Open input and set up decoder.
-static struct Input *
-__open_input(const char * const input_format_name, const char * const input_url,
+struct Input *
+as_open_input(const char * const input_format_name, const char * const input_url,
 		const bool verbose)
 {
 	if (!input_format_name || strlen(input_format_name) == 0 ||
@@ -131,7 +54,7 @@ __open_input(const char * const input_format_name, const char * const input_url,
 	AVInputFormat * const input_format = av_find_input_format(input_format_name);
 	if (!input_format) {
 		printf("input format not found\n");
-		__destroy_input(input);
+		as_destroy_input(input);
 		return NULL;
 	}
 
@@ -139,14 +62,14 @@ __open_input(const char * const input_format_name, const char * const input_url,
 	if (avformat_open_input(&input->format_ctx, input_url, input_format,
 				NULL) != 0) {
 		printf("open input failed\n");
-		__destroy_input(input);
+		as_destroy_input(input);
 		return NULL;
 	}
 
 	// Read packets to get stream info.
 	if (avformat_find_stream_info(input->format_ctx, NULL) < 0) {
 		printf("failed to find stream info\n");
-		__destroy_input(input);
+		as_destroy_input(input);
 		return NULL;
 	}
 
@@ -160,7 +83,7 @@ __open_input(const char * const input_format_name, const char * const input_url,
 			input->format_ctx->streams[0]->codecpar->codec_id);
 	if (!input_codec) {
 		printf("codec not found\n");
-		__destroy_input(input);
+		as_destroy_input(input);
 		return NULL;
 	}
 
@@ -168,7 +91,7 @@ __open_input(const char * const input_format_name, const char * const input_url,
 	input->codec_ctx = avcodec_alloc_context3(input_codec);
 	if (!input->codec_ctx) {
 		printf("could not allocate codec context\n");
-		__destroy_input(input);
+		as_destroy_input(input);
 		return NULL;
 	}
 
@@ -177,7 +100,7 @@ __open_input(const char * const input_format_name, const char * const input_url,
 	if (avcodec_parameters_to_context(input->codec_ctx,
 				input->format_ctx->streams[0]->codecpar) < 0) {
 		printf("unable to initialize input codec parameters\n");
-		__destroy_input(input);
+		as_destroy_input(input);
 		return NULL;
 	}
 
@@ -185,15 +108,15 @@ __open_input(const char * const input_format_name, const char * const input_url,
 	// we passed the codec to avcodec_alloc_context3().
 	if (avcodec_open2(input->codec_ctx, input_codec, NULL) != 0) {
 		printf("unable to initialize codec context\n");
-		__destroy_input(input);
+		as_destroy_input(input);
 		return NULL;
 	}
 
 	return input;
 }
 
-static void
-__destroy_input(struct Input * const input)
+void
+as_destroy_input(struct Input * const input)
 {
 	if (!input) {
 		return;
@@ -215,8 +138,8 @@ __destroy_input(struct Input * const input)
 //
 // output_url: For stdout use 'pipe:1'. For output to a file use 'file:out.mp3'
 // (to name the file out.mp3).
-static struct Output *
-__open_output(const struct Input * const input,
+struct Output *
+as_open_output(const struct Input * const input,
 		const char * const output_format, const char * const output_url,
 		const char * const output_encoder)
 {
@@ -240,7 +163,7 @@ __open_output(const struct Input * const input,
 	if (avformat_alloc_output_context2(&output->format_ctx, NULL, output_format,
 				NULL) < 0) {
 		printf("unable to allocate AVFormatContext\n");
-		__destroy_output(output);
+		as_destroy_output(output);
 		return NULL;
 	}
 
@@ -248,7 +171,7 @@ __open_output(const struct Input * const input,
 	// Open IO context - open output file.
 	if (avio_open(&output->format_ctx->pb, output_url, AVIO_FLAG_WRITE) < 0) {
 		printf("unable to open output\n");
-		__destroy_output(output);
+		as_destroy_output(output);
 		return NULL;
 	}
 
@@ -258,7 +181,7 @@ __open_output(const struct Input * const input,
 	AVCodec * const output_codec = avcodec_find_encoder_by_name(output_encoder);
 	if (!output_codec) {
 		printf("output codec not found\n");
-		__destroy_output(output);
+		as_destroy_output(output);
 		return NULL;
 	}
 
@@ -270,7 +193,7 @@ __open_output(const struct Input * const input,
 	AVStream * const stream = avformat_new_stream(output->format_ctx, NULL);
 	if (!stream) {
 		printf("unable to add stream\n");
-		__destroy_output(output);
+		as_destroy_output(output);
 		return NULL;
 	}
 
@@ -283,7 +206,7 @@ __open_output(const struct Input * const input,
 	output->codec_ctx = avcodec_alloc_context3(output_codec);
 	if (!output->codec_ctx) {
 		printf("unable to allocate output codec context\n");
-		__destroy_output(output);
+		as_destroy_output(output);
 		return NULL;
 	}
 
@@ -297,7 +220,7 @@ __open_output(const struct Input * const input,
 	// Initialize the codec context to use the codec.
 	if (avcodec_open2(output->codec_ctx, output_codec, NULL) != 0) {
 		printf("unable to initialize output codec context to use codec\n");
-		__destroy_output(output);
+		as_destroy_output(output);
 		return NULL;
 	}
 
@@ -305,14 +228,14 @@ __open_output(const struct Input * const input,
 	if (avcodec_parameters_from_context(stream->codecpar,
 				output->codec_ctx) < 0) {
 		printf("unable to set output codec parameters\n");
-		__destroy_output(output);
+		as_destroy_output(output);
 		return NULL;
 	}
 
 	// Write file header
 	if (avformat_write_header(output->format_ctx, NULL) < 0) {
 		printf("unable to write header\n");
-		__destroy_output(output);
+		as_destroy_output(output);
 		return NULL;
 	}
 
@@ -332,21 +255,21 @@ __open_output(const struct Input * const input,
 			NULL);
 	if (!output->resample_ctx) {
 		printf("unable to allocate resample context\n");
-		__destroy_output(output);
+		as_destroy_output(output);
 		return NULL;
 	}
 
 	if (swr_init(output->resample_ctx) < 0) {
 		printf("unable to open resample context\n");
-		__destroy_output(output);
+		as_destroy_output(output);
 		return NULL;
 	}
 
 	return output;
 }
 
-static void
-__destroy_output(struct Output * const output)
+void
+as_destroy_output(struct Output * const output)
 {
 	if (!output) {
 		return;
@@ -388,8 +311,8 @@ __destroy_output(struct Output * const output)
 //
 // For some more info on this, read top explanatory comment in avcodec.h.
 // avformat.h also has some information.
-static bool
-__read_write_loop(const struct Input * const input,
+bool
+as_read_write_loop(const struct Input * const input,
 		const struct Output * const output, const int max_frames)
 {
 	if (!input || !output) {

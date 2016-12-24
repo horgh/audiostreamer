@@ -49,9 +49,10 @@ TARGETS=audiostreamer
 
 all: $(TARGETS)
 
-audiostreamer: audiostreamer.c
+audiostreamer: main.c audiostreamer.c audiostreamer.h
 	@# -lavutil for av_frame_free
-	$(CC) $(CFLAGS) -o $@ $< -lavformat -lavdevice -lavcodec -lavutil -lswresample
+	$(CC) $(CFLAGS) -o $@ $< audiostreamer.c -lavformat -lavdevice -lavcodec \
+		-lavutil -lswresample
 
 clean:
 	rm -f $(TARGETS)
