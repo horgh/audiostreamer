@@ -72,7 +72,7 @@ main(void)
 
 	// Open output and encoder.
 
-	struct Output * const output = __open_output(input, "mp3", "out.mp3",
+	struct Output * const output = __open_output(input, "mp3", "file:out.mp3",
 			"libmp3lame");
 	if (!output) {
 		__destroy_input(input);
@@ -453,10 +453,14 @@ __read_write_loop(const struct Input * const input,
 		}
 
 		if (write_res == 1) {
-			frames_written++;
+			if (frames_written == INT_MAX) {
+				frames_written = 0;
+			} else {
+				frames_written++;
+			}
 		}
 
-		if (frames_written >= max_frames) {
+		if (max_frames != -1 && frames_written >= max_frames) {
 			break;
 		}
 	}
@@ -560,6 +564,14 @@ __decode_and_store_frame(const struct Input * const input,
 	// Add the samples to the fifo.
 
 	// Resize fifo so it can contain old and new samples.
+	if (av_audio_fifo_size(af) > INT_MAX - input_frame->nb_samples) {
+		printf("overflow\n");
+		av_frame_free(&input_frame);
+		av_freep(&converted_input_samples[0]);
+		free(converted_input_samples);
+		return -1;
+	}
+
 	if (av_audio_fifo_realloc(af,
 				av_audio_fifo_size(af)+input_frame->nb_samples) != 0) {
 		printf("unable to resize fifo\n");
@@ -655,6 +667,13 @@ __encode_and_write_frame(const struct Output * const output,
 	}
 
 	output_frame->pts = *pts;
+
+	if (*pts > INT64_MAX - output_frame->nb_samples) {
+		printf("overflow\n");
+		av_frame_free(&output_frame);
+		return -1;
+	}
+
 	*pts += output_frame->nb_samples;
 
 
