@@ -13,6 +13,9 @@ main(void)
 	const char * const input_format = "pulse";
 	const char * const input_url
 		= "alsa_output.pci-0000_00_1f.3.analog-stereo.monitor";
+	// MP3
+	//const char * const input_format = "mp3";
+	//const char * const input_url = "file:/tmp/test.mp3";
 	const bool verbose = true;
 	struct Input * const input = as_open_input(input_format, input_url, verbose);
 	if (!input) {
