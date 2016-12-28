@@ -3,7 +3,6 @@
 #include <libavcodec/avcodec.h>
 #include <libavdevice/avdevice.h>
 #include <libavformat/avformat.h>
-#include <libavutil/audio_fifo.h>
 #include <libswresample/swresample.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -307,25 +306,14 @@ as_destroy_output(struct Output * const output)
 	free(output);
 }
 
-// Begin read, decode, encode, write process.
-//
-// We repeatedly read in data (av_read_frame()). This gives us an AVPacket with
-// encoded data. We decode each packet with avcodec_send_packet(). Then we get
-// the decoded data out using avcodec_receive_frame().
-//
-// Writing: avformat_write_header() to write the file header, then
-// av_write_frame() repeatedly to write each encoded packet, and finally
-// av_write_trailer() to finalize the file.
-//
-// For some more info on this, read top explanatory comment in avcodec.h.
-// avformat.h also has some information.
-bool
-as_read_write_loop(const struct Input * const input,
-		const struct Output * const output, const int max_frames)
+// Create an initialize a new Audiostreamer struct.
+struct Audiostreamer *
+as_init_audiostreamer(struct Input * const input, struct Output * const output)
 {
-	if (!input || !output) {
-		printf("%s\n", strerror(EINVAL));
-		return false;
+	struct Audiostreamer * const as = calloc(1, sizeof(struct Audiostreamer));
+	if (!as) {
+		printf("%s\n", strerror(errno));
+		return NULL;
 	}
 
 	// The number of samples read in a frame from the input can be larger or
@@ -343,70 +331,136 @@ as_read_write_loop(const struct Input * const input,
 	// hold raw data either, so I'm not sure it is applicable.
 
 	// We must have an initial allocation size of at least 1.
-	AVAudioFifo * const af = av_audio_fifo_alloc(output->codec_ctx->sample_fmt,
+	as->af = av_audio_fifo_alloc(output->codec_ctx->sample_fmt,
 			output->codec_ctx->channels, 1);
-	if (!af) {
+	if (!as->af) {
 		printf("unable to allocate audio fifo\n");
-		return false;
+		as_destroy_audiostreamer(as);
+		return NULL;
 	}
 
 	// Presentation timestamp (PTS). This needs to increase for each sample we
 	// output.
-	int64_t pts = 1;
+	as->pts = 1;
 
-	int frames_written = 0;
+	as->frames_written = 0;
 
-	while (1) {
-		// Find how many samples are in the FIFO.
-		const int available_samples = av_audio_fifo_size(af);
+	as->input = input;
+	as->output = output;
 
-		// Do we need to read & decode another frame from the input?
-		if (available_samples < output->codec_ctx->frame_size) {
-			const int read_res = __decode_and_store_frame(input, output, af);
-			if (read_res == -1) {
-				printf("__decode_and_store_frame error\n");
-				av_audio_fifo_free(af);
-				return false;
-			}
+	return as;
+}
 
-			// EOF from input.
-			if (read_res == 0) {
-				break;
-			}
+// Take one of two actions each call:
+//
+// 1. If there are insufficient samples for the encoder, read more samples.
+// 2. If there are sufficient samples for the encoder, feed them to the encoder
+//   and try to write a frame.
+//
+// If we hit stream EOF on read, we drain the codecs and complete.
+//
+// To transcode an input to an output, call this function repeatedly until it
+// returns 0 (or -1).
+//
+// I've chosen to make this do one unit of work so as to let the caller be able
+// to decide whether to stop or not. This is as opposed to having while (1) in
+// a single function and make interruption be problematic.
+//
+// Essentially how the decoding/encoding process works is:
+//
+// We repeatedly read in data (av_read_frame()). This gives us an AVPacket with
+// encoded data. We decode each packet with avcodec_send_packet(). Then we get
+// the decoded data out using avcodec_receive_frame().
+//
+// Writing: avformat_write_header() to write the file header, then
+// av_write_frame() repeatedly to write each encoded packet, and finally
+// av_write_trailer() to finalize the file.
+//
+// For some more info on this, read top explanatory comment in avcodec.h.
+// avformat.h also has some information.
+//
+// Returns:
+// 1 if made progress (and more to do)
+// 0 if done (hit EOF)
+// -1 if error
+int
+as_read_write(struct Audiostreamer * const as)
+{
+	if (!as || !as->input || !as->output || !as->af) {
+		printf("%s\n", strerror(EINVAL));
+		return -1;
+	}
 
-			// Go read some more, or if we have enough samples, write out.
-			continue;
+	// Find how many samples are in the FIFO.
+	const int available_samples = av_audio_fifo_size(as->af);
+
+	// Do we need to read & decode another frame from the input? We do if there
+	// are insufficient number of samples for the encoder.
+	if (available_samples < as->output->codec_ctx->frame_size) {
+		const int read_res = __decode_and_store_frame(as->input, as->output,
+				as->af);
+		if (read_res == -1) {
+			printf("__decode_and_store_frame error\n");
+			return -1;
 		}
 
-		// We have enough samples to encode and write.
-
-		const int write_res = __encode_and_write_frame(output, af, &pts);
-		if (write_res == -1) {
-			av_audio_fifo_free(af);
-			return false;
-		}
-
-		if (write_res == 1) {
-			if (frames_written == INT_MAX) {
-				frames_written = 0;
-			} else {
-				frames_written++;
+		// EOF from input.
+		if (read_res == 0) {
+			if (!__drain_codecs(as->input, as->output, as->af)) {
+				printf("unable to drain codecs\n");
+				return -1;
 			}
+
+			// We're done.
+			return 0;
 		}
 
-		if (max_frames != -1 && frames_written >= max_frames) {
-			break;
+		// We did some work. Go back and let caller call us again.
+		return 1;
+	}
+
+	// We have enough samples to encode and write.
+
+	const int write_res = __encode_and_write_frame(as->output, as->af, &as->pts);
+	if (write_res == -1) {
+		return -1;
+	}
+
+	if (write_res == 1) {
+		if (as->frames_written == UINT64_MAX) {
+			as->frames_written = 0;
+		} else {
+			as->frames_written += 1;
 		}
 	}
 
-	if (!__drain_codecs(input, output, af)) {
-		printf("unable to drain codecs\n");
-		av_audio_fifo_free(af);
-		return false;
+	// We did a unit of work. Let caller call us again.
+	return 1;
+}
+
+// Destroy an audiostreamer.
+//
+// We clean up everything including input and output.
+void
+as_destroy_audiostreamer(struct Audiostreamer * const as)
+{
+	if (!as) {
+		return;
 	}
 
-	av_audio_fifo_free(af);
-	return true;
+	if (as->input) {
+		as_destroy_input(as->input);
+	}
+
+	if (as->output) {
+		as_destroy_output(as->output);
+	}
+
+	if (as->af) {
+		av_audio_fifo_free(as->af);
+	}
+
+	free(as);
 }
 
 // Read an encoded frame (packet) from the input. Decode it (frame). Store the

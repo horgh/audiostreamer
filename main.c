@@ -41,23 +41,41 @@ main(void)
 	}
 
 
-	// Read, decode, encode, write loop.
-
-	// For testing purposes it is useful to limit how many frames we write before
-	// exiting. Use -1 for no limit.
-	const int max_frames = 300;
-
-	if (!as_read_write_loop(input, output, max_frames)) {
+	// Read, decode, encode, write in a loop until we either hit input EOF or
+	// reach the maximum number of frames we want to output right now.
+	struct Audiostreamer * const as = as_init_audiostreamer(input, output);
+	if (!as) {
 		as_destroy_input(input);
 		as_destroy_output(output);
 		return 1;
 	}
 
+	// For testing purposes it is useful to limit how many frames we write before
+	// exiting. Use -1 for no limit.
+	const uint64_t max_frames = 100;
+
+	while (1) {
+		const int res = as_read_write(as);
+		if (res == -1) {
+			printf("error\n");
+			as_destroy_audiostreamer(as);
+			return 1;
+		}
+
+		if (res == 0) {
+			break;
+		}
+
+		if (as->frames_written == max_frames) {
+			printf("hit max frames written\n");
+			break;
+		}
+	}
+
 
 	// Clean up.
 
-	as_destroy_input(input);
-	as_destroy_output(output);
+	as_destroy_audiostreamer(as);
 
 	return 0;
 }

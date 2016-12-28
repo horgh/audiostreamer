@@ -4,6 +4,7 @@
 
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
+#include <libavutil/audio_fifo.h>
 #include <libswresample/swresample.h>
 #include <stdbool.h>
 
@@ -16,6 +17,21 @@ struct Output {
 	AVFormatContext * format_ctx;
 	AVCodecContext * codec_ctx;
 	SwrContext * resample_ctx;
+};
+
+struct Audiostreamer {
+	struct Input * input;
+	struct Output * output;
+
+	// Audio samples FIFO. Because decoder/encoder may provide/expect differing
+	// numbers of samples, we buffer samples here.
+	AVAudioFifo * af;
+
+	// Presentation timestamp. Increases as we output samples.
+	int64_t pts;
+
+	// Number of frames written.
+	uint64_t frames_written;
 };
 
 void
@@ -36,6 +52,11 @@ as_open_output(const struct Input * const,
 void
 as_destroy_output(struct Output * const);
 
-bool
-as_read_write_loop(const struct Input * const,
-		const struct Output * const, const int);
+struct Audiostreamer *
+as_init_audiostreamer(struct Input * const, struct Output * const);
+
+int
+as_read_write(struct Audiostreamer * const);
+
+void
+as_destroy_audiostreamer(struct Audiostreamer * const);
