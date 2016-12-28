@@ -43,8 +43,8 @@ as_setup(void)
 
 // Open input and set up decoder.
 struct Input *
-as_open_input(const char * const input_format_name, const char * const input_url,
-		const bool verbose)
+as_open_input(const char * const input_format_name,
+		const char * const input_url, const bool verbose)
 {
 	if (!input_format_name || strlen(input_format_name) == 0 ||
 			!input_url || strlen(input_url) == 0) {

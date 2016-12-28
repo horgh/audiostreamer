@@ -22,8 +22,8 @@ void
 as_setup(void);
 
 struct Input *
-as_open_input(const char * const, const char * const,
-		const bool);
+as_open_input(const char * const,
+		const char * const, const bool);
 
 void
 as_destroy_input(struct Input * const);
