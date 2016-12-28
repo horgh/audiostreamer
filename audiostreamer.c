@@ -1,9 +1,6 @@
 #include "audiostreamer.h"
 #include <errno.h>
-#include <libavcodec/avcodec.h>
 #include <libavdevice/avdevice.h>
-#include <libavformat/avformat.h>
-#include <libswresample/swresample.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
