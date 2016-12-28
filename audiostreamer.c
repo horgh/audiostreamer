@@ -13,13 +13,21 @@
 static int
 __decode_and_store_frame(const struct Input * const,
 		const struct Output * const, AVAudioFifo * const);
+static int
+__decode_and_store_samples(const struct Input * const,
+		const struct Output * const, AVAudioFifo * const);
 static const uint8_t * *
 __copy_samples(uint8_t * * const, const int);
 static int
 __encode_and_write_frame(const struct Output * const,
 		AVAudioFifo * const, int64_t * const);
+static int
+__read_and_write_packet(const struct Output * const);
 static char *
 __get_error_string(const int);
+static bool
+__drain_codecs(const struct Input * const,
+		const struct Output * const, AVAudioFifo * const);
 
 void
 as_setup(void)
@@ -356,14 +364,17 @@ as_read_write_loop(const struct Input * const input,
 		if (available_samples < output->codec_ctx->frame_size) {
 			const int read_res = __decode_and_store_frame(input, output, af);
 			if (read_res == -1) {
+				printf("__decode_and_store_frame error\n");
 				av_audio_fifo_free(af);
 				return false;
 			}
 
+			// EOF from input.
 			if (read_res == 0) {
 				break;
 			}
 
+			// Go read some more, or if we have enough samples, write out.
 			continue;
 		}
 
@@ -388,6 +399,12 @@ as_read_write_loop(const struct Input * const input,
 		}
 	}
 
+	if (!__drain_codecs(input, output, af)) {
+		printf("unable to drain codecs\n");
+		av_audio_fifo_free(af);
+		return false;
+	}
+
 	av_audio_fifo_free(af);
 	return true;
 }
@@ -409,17 +426,18 @@ __decode_and_store_frame(const struct Input * const input,
 	}
 
 	// Read an encoded frame as a packet.
+
 	AVPacket input_pkt;
 	memset(&input_pkt, 0, sizeof(AVPacket));
 
 	if (av_read_frame(input->format_ctx, &input_pkt) != 0) {
-		printf("unable to read frame\n");
 		// EOF.
 		return 0;
 	}
 
 
 	// Send encoded packet to the input's decoder.
+
 	if (avcodec_send_packet(input->codec_ctx, &input_pkt) != 0) {
 		printf("send_packet failed\n");
 		av_packet_unref(&input_pkt);
@@ -428,22 +446,45 @@ __decode_and_store_frame(const struct Input * const input,
 
 	av_packet_unref(&input_pkt);
 
+	return __decode_and_store_samples(input, output, af);
+}
 
+// Read a decoded frame out of the input's decoder. Convert the samples and
+// store them in the FIFO.
+//
+// Prereq: We must either have sent an encoded packet to the decoder, or be in
+// draining mode.
+//
+// Returns:
+// -1 if error
+// 1 if frame read and stored
+// 0 if EOF/EAGAIN
+static int
+__decode_and_store_samples(const struct Input * const input,
+		const struct Output * const output, AVAudioFifo * const af)
+{
 	// Get decoded data out as a frame.
+
 	AVFrame * input_frame = av_frame_alloc();
 	if (!input_frame) {
 		printf("av_frame_alloc\n");
 		return -1;
 	}
 
-	if (avcodec_receive_frame(input->codec_ctx, input_frame) != 0) {
-		printf("avcodec_receive_frame failed\n");
+	const int error = avcodec_receive_frame(input->codec_ctx, input_frame);
+	if (error != 0) {
+		if (error == AVERROR(EAGAIN) || error == AVERROR_EOF) {
+			av_frame_free(&input_frame);
+			return 0;
+		}
+
+		printf("avcodec_receive_frame failed: %s\n", __get_error_string(error));
 		av_frame_free(&input_frame);
 		return -1;
 	}
 
 
-	// Convert the samples
+	// Convert the samples in the frame.
 
 	const uint8_t * * const raw_samples = __copy_samples(
 			input_frame->extended_data, output->codec_ctx->channels);
@@ -487,6 +528,7 @@ __decode_and_store_frame(const struct Input * const input,
 	// Add the samples to the fifo.
 
 	// Resize fifo so it can contain old and new samples.
+
 	if (av_audio_fifo_size(af) > INT_MAX - input_frame->nb_samples) {
 		printf("overflow\n");
 		av_frame_free(&input_frame);
@@ -601,7 +643,7 @@ __encode_and_write_frame(const struct Output * const output,
 
 
 	// Send the raw frame to the encoder.
-	int error = avcodec_send_frame(output->codec_ctx, output_frame);
+	const int error = avcodec_send_frame(output->codec_ctx, output_frame);
 	if (error != 0) {
 		printf("avcodec_send_frame failed: %s\n", __get_error_string(error));
 		av_frame_free(&output_frame);
@@ -610,17 +652,37 @@ __encode_and_write_frame(const struct Output * const output,
 
 	av_frame_free(&output_frame);
 
+	return __read_and_write_packet(output);
+}
 
+// Read an encoded packet from output encoder. Write it out as a packet.
+//
+// Prereq: We must either have sent a raw frame to the encoder, or be in
+// draining mode.
+//
+// Returns:
+// -1 if error
+// 1 if packet read/written
+// 0 if we need to try again with more frames/samples before we can encode a
+// packet (EAGAIN) or we're done (EOF).
+static int
+__read_and_write_packet(const struct Output * const output)
+{
 	// Read encoded data from the encoder.
 
 	AVPacket output_pkt;
 	memset(&output_pkt, 0, sizeof(AVPacket));
 
-	error = avcodec_receive_packet(output->codec_ctx, &output_pkt);
+	const int error = avcodec_receive_packet(output->codec_ctx, &output_pkt);
 	if (error != 0) {
 		// We expect that we will not always have enough data to get a fully encoded
 		// frame out.
 		if (error == AVERROR(EAGAIN)) {
+			return 0;
+		}
+
+		// In draining mode we never get EAGAIN, but we get EOF.
+		if (error == AVERROR_EOF) {
 			return 0;
 		}
 
@@ -652,4 +714,57 @@ __get_error_string(const int error)
 	av_strerror(error, buf, 255);
 
 	return buf;
+}
+
+// We're at EOF. However, we still have work to finish up. First, there may be
+// samples still in the FIFO. Second, we need to drain the codecs. As
+// described in avcodec.h, the codecs may buffer for one reason or another.
+//
+// To drain them, we put each in draining mode. This is done by sending NULL
+// to avcodec_send_packet() (for decoding) and to avcodec_send_frame() for
+// encoding. Then we need to call avcodec_receive_frame() (decoding) or
+// avcodec_receive_packet() (encoding) repeatedly until we hit
+// AVERROR(EAGAIN).
+static bool
+__drain_codecs(const struct Input * const input,
+		const struct Output * const output, AVAudioFifo * const af)
+{
+	// Enter draining mode for decoder.
+	if (avcodec_send_packet(input->codec_ctx, NULL) != 0) {
+		printf("send_packet failed (draining mode)\n");
+		return false;
+	}
+
+	// Drain the decoder. All frames/samples end up in the FIFO.
+	while (1) {
+		const int res = __decode_and_store_samples(input, output, af);
+		if (res == -1) {
+			return false;
+		}
+
+		// Decoder said EOF.
+		if (res == 0) {
+			break;
+		}
+	}
+
+	// Enter draining mode for encoder.
+	if (avcodec_send_frame(output->codec_ctx, NULL) != 0) {
+		printf("send_frame failed (draining mode)\n");
+		return false;
+	}
+
+	while (1) {
+		const int res = __read_and_write_packet(output);
+		if (res == -1) {
+			return false;
+		}
+
+		// Encoder said EOF.
+		if (res == 0) {
+			break;
+		}
+	}
+
+	return true;
 }
