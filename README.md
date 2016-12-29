@@ -22,4 +22,5 @@ system's audio.
     MP3/Webm+Vorbis.
   * audiostreamer.h: A library that uses ffmpeg to read/decode from PulseAudio
     and encode/write to MP3/Webm+Vorbis.
-  * main.c: A sample C program that uses audiostreamer.h to transcode to a file.
+  * transcode_example: A sample C program that uses audiostreamer.h to transcode
+    to a file.
