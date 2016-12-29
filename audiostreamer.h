@@ -56,7 +56,7 @@ struct Audiostreamer *
 as_init_audiostreamer(struct Input * const, struct Output * const);
 
 int
-as_read_write(struct Audiostreamer * const);
+as_read_write(struct Audiostreamer * const, int * const);
 
 void
 as_destroy_audiostreamer(struct Audiostreamer * const);

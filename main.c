@@ -55,7 +55,8 @@ main(void)
 	const uint64_t max_frames = 100;
 
 	while (1) {
-		const int res = as_read_write(as);
+		int frame_sz = 0;
+		const int res = as_read_write(as, &frame_sz);
 		if (res == -1) {
 			printf("error\n");
 			as_destroy_audiostreamer(as);
@@ -64,6 +65,12 @@ main(void)
 
 		if (res == 0) {
 			break;
+		}
+
+		if (frame_sz > 0) {
+			printf("wrote frame size %d\n", frame_sz);
+		} else {
+			printf("didn't write frame\n");
 		}
 
 		if (as->frames_written == max_frames) {

@@ -221,6 +221,22 @@ as_open_output(const struct Input * const input,
 	// 96 Kb/s
 	output->codec_ctx->bit_rate       = 96000;
 
+	// Turn off using bit reservoir if we're using MP3. This allows any frame to
+	// be valid on its own in exchange for a potential reduction in quality. See
+	// http://lame.sourceforge.net/tech-FAQ.txt and
+	// http://wiki.hydrogenaud.io/index.php?title=Bit_reservoir
+	//
+	// My intention is it to be valid to start streaming with any frame.
+	if (strcmp(output_encoder, "libmp3lame") == 0) {
+		const int error = av_opt_set_int(output->codec_ctx->priv_data, "reservoir",
+				0, 0);
+		if (error != 0) {
+			printf("unable to set option: %s\n", __get_error_string(error));
+			as_destroy_output(output);
+			return NULL;
+		}
+	}
+
 	// Initialize the codec context to use the codec.
 	if (avcodec_open2(output->codec_ctx, output_codec, NULL) != 0) {
 		printf("unable to initialize output codec context to use codec\n");
@@ -380,8 +396,10 @@ as_init_audiostreamer(struct Input * const input, struct Output * const output)
 // 1 if made progress (and more to do)
 // 0 if done (hit EOF)
 // -1 if error
+//
+// If we write a packet out, its size will be in frame_size (compressed size).
 int
-as_read_write(struct Audiostreamer * const as)
+as_read_write(struct Audiostreamer * const as, int * const frame_size)
 {
 	if (!as || !as->input || !as->output || !as->af) {
 		printf("%s\n", strerror(EINVAL));
@@ -423,12 +441,14 @@ as_read_write(struct Audiostreamer * const as)
 		return -1;
 	}
 
-	if (write_res == 1) {
+	if (write_res > 0) {
 		if (as->frames_written == UINT64_MAX) {
 			as->frames_written = 0;
 		} else {
 			as->frames_written += 1;
 		}
+
+		*frame_size = write_res;
 	}
 
 	// We did a unit of work. Let caller call us again.
@@ -644,7 +664,7 @@ __copy_samples(uint8_t * * const src, const int nb_channels)
 // We update the pts.
 //
 // Return values:
-// 1 if we write a frame
+// > 0 if we write a frame. This will be the frame's size (compressed size).
 // 0 if we do not write a frame (this is not an error)
 // -1 if error
 static int
@@ -713,9 +733,9 @@ __encode_and_write_frame(const struct Output * const output,
 //
 // Returns:
 // -1 if error
-// 1 if packet read/written
+// > 0 if we write a frame. This will be the frame's size (compressed size).
 // 0 if we need to try again with more frames/samples before we can encode a
-// packet (EAGAIN) or we're done (EOF).
+//   packet (EAGAIN) or we're done (EOF).
 static int
 __read_and_write_packet(const struct Output * const output)
 {
@@ -741,6 +761,9 @@ __read_and_write_packet(const struct Output * const output)
 		return -1;
 	}
 
+	// We now have a compressed, encoded frame. This frame is in a packet. We can
+	// tell its compressed size: output_pkt.size.
+	const int sz = output_pkt.size;
 
 	// Write encoded data packet out using av_write_frame().
 	if (av_write_frame(output->format_ctx, &output_pkt) < 0) {
@@ -750,7 +773,8 @@ __read_and_write_packet(const struct Output * const output)
 	}
 
 	av_packet_unref(&output_pkt);
-	return 1;
+
+	return sz;
 }
 
 // Take an error code from the ffmpeg libraries and translate it into a string.
