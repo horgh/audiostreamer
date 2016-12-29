@@ -181,11 +181,37 @@ func encoderSupervisor(outPipe *os.File, inputFormat, inputURL string,
 		select {
 		// A change in the number of clients.
 		case change := <-clientChangeChan:
-			if verbose {
-				log.Printf("encoder supervisor: client change: %d", change)
+			// Gaining a client.
+			if change == 1 {
+				clients++
+
+				if verbose {
+					log.Printf("encoder supervisor: new client. %d clients connected",
+						clients)
+				}
+
+				if clients == 1 {
+					if verbose {
+						log.Printf("encoder supervisor: starting encoder")
+					}
+
+					encoderStopChan = make(chan struct{})
+
+					go encoder(outPipe, inputFormat, inputURL, encoderStopChan,
+						encoderDoneChan, frameChan)
+				}
+
+				continue
 			}
 
-			clients += change
+			// Losing a client.
+			clients--
+
+			if verbose {
+				log.Printf("encoder supervisor: lost client. %d clients connected",
+					clients)
+			}
+
 			if clients == 0 {
 				// Tell encoder to stop.
 				close(encoderStopChan)
@@ -194,19 +220,6 @@ func encoderSupervisor(outPipe *os.File, inputFormat, inputURL string,
 				}
 				continue
 			}
-
-			if clients != 1 {
-				continue
-			}
-
-			if verbose {
-				log.Printf("encoder supervisor: starting encoder")
-			}
-
-			encoderStopChan = make(chan struct{})
-
-			go encoder(outPipe, inputFormat, inputURL, encoderStopChan,
-				encoderDoneChan, frameChan)
 
 		// Encoder stopped for some reason. Restart it if appropriate.
 		case <-encoderDoneChan:
