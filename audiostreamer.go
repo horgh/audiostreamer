@@ -5,7 +5,9 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"net/http/fcgi"
 	"os"
 	"unsafe"
 )
@@ -22,6 +24,8 @@ type Args struct {
 	InputFormat string
 	InputURL    string
 	Verbose     bool
+	// Serve with FCGI protocol (true) or HTTP (false).
+	FCGI bool
 }
 
 // HTTPHandler allows us to pass information to our request handlers.
@@ -80,6 +84,8 @@ func main() {
 		clientChangeChan, frameChan)
 	go reader(args.Verbose, in, clientChan, frameChan)
 
+	// Start serving either with HTTP or FastCGI.
+
 	hostPort := fmt.Sprintf("%s:%d", args.ListenHost, args.ListenPort)
 
 	handler := HTTPHandler{
@@ -88,16 +94,30 @@ func main() {
 		ClientChan:       clientChan,
 	}
 
-	s := &http.Server{
-		Addr:    hostPort,
-		Handler: handler,
-	}
+	if args.FCGI {
+		listener, err := net.Listen("tcp", hostPort)
+		if err != nil {
+			log.Fatalf("Unable to listen: %s", err)
+		}
 
-	log.Printf("Starting to serve requests on %s (HTTP)", hostPort)
+		log.Printf("Starting to serve requests on %s (FastCGI)", hostPort)
 
-	err = s.ListenAndServe()
-	if err != nil {
-		log.Fatalf("Unable to serve: %s", err)
+		err = fcgi.Serve(listener, handler)
+		if err != nil {
+			log.Fatalf("Unable to serve: %s", err)
+		}
+	} else {
+		s := &http.Server{
+			Addr:    hostPort,
+			Handler: handler,
+		}
+
+		log.Printf("Starting to serve requests on %s (HTTP)", hostPort)
+
+		err = s.ListenAndServe()
+		if err != nil {
+			log.Fatalf("Unable to serve: %s", err)
+		}
 	}
 }
 
@@ -108,6 +128,7 @@ func getArgs() (Args, error) {
 	format := flag.String("format", "pulse", "Input format. pulse for PulseAudio or mp3 for MP3.")
 	input := flag.String("input", "", "Input URL valid for the given format. For MP3 you can give this as a path to a file. For PulseAudio you can give a value such as alsa_output.pci-0000_00_1f.3.analog-stereo.monitor to take input from a monitor. Use 'pactl list sources' to show the available PulseAudio sources.")
 	verbose := flag.Bool("verbose", false, "Enable verbose logging output.")
+	fcgi := flag.Bool("fcgi", true, "Serve using FastCGI (true) or as a regular HTTP server.")
 
 	flag.Parse()
 
@@ -132,6 +153,7 @@ func getArgs() (Args, error) {
 		InputFormat: *format,
 		InputURL:    *input,
 		Verbose:     *verbose,
+		FCGI:        *fcgi,
 	}, nil
 }
 
