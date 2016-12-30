@@ -67,6 +67,8 @@ main(void)
 			break;
 		}
 
+		// We did some work.
+
 		if (as->frames_written == max_frames) {
 			printf("hit max frames written\n");
 			break;

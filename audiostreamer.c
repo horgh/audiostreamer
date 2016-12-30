@@ -7,23 +7,20 @@
 #include <string.h>
 
 static int
-__decode_and_store_frame(const struct Input * const,
-		const struct Output * const, AVAudioFifo * const);
+__decode_and_store_frame(const struct Audiostreamer * const);
 static int
 __decode_and_store_samples(const struct Input * const,
 		const struct Output * const, AVAudioFifo * const);
 static const uint8_t * *
 __copy_samples(uint8_t * * const, const int);
 static int
-__encode_and_write_frame(const struct Output * const,
-		AVAudioFifo * const, int64_t * const);
+__encode_and_write_frame(struct Audiostreamer * const);
 static int
-__read_and_write_packet(const struct Output * const);
+__read_and_write_packet(struct Audiostreamer * const);
 static char *
 __get_error_string(const int);
 static bool
-__drain_codecs(const struct Input * const,
-		const struct Output * const, AVAudioFifo * const);
+__drain_codecs(struct Audiostreamer * const);
 
 void
 as_setup(void)
@@ -201,8 +198,12 @@ as_open_output(const struct Input * const input,
 		return NULL;
 	}
 
-	stream->time_base.den = input->codec_ctx->sample_rate;
+	// Unit of time (in seconds) in which frame timestamps are represented.
+
+	// Numerator
 	stream->time_base.num = 1;
+	// Denominator
+	stream->time_base.den = input->codec_ctx->sample_rate;
 
 
 	// Set up output encoder
@@ -412,8 +413,7 @@ as_read_write(struct Audiostreamer * const as, int * const frame_size)
 	// Do we need to read & decode another frame from the input? We do if there
 	// are insufficient number of samples for the encoder.
 	if (available_samples < as->output->codec_ctx->frame_size) {
-		const int read_res = __decode_and_store_frame(as->input, as->output,
-				as->af);
+		const int read_res = __decode_and_store_frame(as);
 		if (read_res == -1) {
 			printf("__decode_and_store_frame error\n");
 			return -1;
@@ -421,7 +421,7 @@ as_read_write(struct Audiostreamer * const as, int * const frame_size)
 
 		// EOF from input.
 		if (read_res == 0) {
-			if (!__drain_codecs(as->input, as->output, as->af)) {
+			if (!__drain_codecs(as)) {
 				printf("unable to drain codecs\n");
 				return -1;
 			}
@@ -430,13 +430,13 @@ as_read_write(struct Audiostreamer * const as, int * const frame_size)
 			return 0;
 		}
 
-		// We did some work. Go back and let caller call us again.
+		// We did some work. Let caller call us again.
 		return 1;
 	}
 
 	// We have enough samples to encode and write.
 
-	const int write_res = __encode_and_write_frame(as->output, as->af, &as->pts);
+	const int write_res = __encode_and_write_frame(as);
 	if (write_res == -1) {
 		return -1;
 	}
@@ -488,10 +488,9 @@ as_destroy_audiostreamer(struct Audiostreamer * const as)
 // 0 if EOF
 // -1 if error
 static int
-__decode_and_store_frame(const struct Input * const input,
-		const struct Output * const output, AVAudioFifo * const af)
+__decode_and_store_frame(const struct Audiostreamer * const as)
 {
-	if (!input || !af) {
+	if (!as) {
 		printf("%s\n", strerror(EINVAL));
 		return -1;
 	}
@@ -501,7 +500,7 @@ __decode_and_store_frame(const struct Input * const input,
 	AVPacket input_pkt;
 	memset(&input_pkt, 0, sizeof(AVPacket));
 
-	if (av_read_frame(input->format_ctx, &input_pkt) != 0) {
+	if (av_read_frame(as->input->format_ctx, &input_pkt) != 0) {
 		// EOF.
 		return 0;
 	}
@@ -509,7 +508,7 @@ __decode_and_store_frame(const struct Input * const input,
 
 	// Send encoded packet to the input's decoder.
 
-	if (avcodec_send_packet(input->codec_ctx, &input_pkt) != 0) {
+	if (avcodec_send_packet(as->input->codec_ctx, &input_pkt) != 0) {
 		printf("send_packet failed\n");
 		av_packet_unref(&input_pkt);
 		return -1;
@@ -517,7 +516,7 @@ __decode_and_store_frame(const struct Input * const input,
 
 	av_packet_unref(&input_pkt);
 
-	return __decode_and_store_samples(input, output, af);
+	return __decode_and_store_samples(as->input, as->output, as->af);
 }
 
 // Read a decoded frame out of the input's decoder. Convert the samples and
@@ -668,10 +667,9 @@ __copy_samples(uint8_t * * const src, const int nb_channels)
 // 0 if we do not write a frame (this is not an error)
 // -1 if error
 static int
-__encode_and_write_frame(const struct Output * const output,
-		AVAudioFifo * const af, int64_t * const pts)
+__encode_and_write_frame(struct Audiostreamer * const as)
 {
-	if (!output || !af || !pts) {
+	if (!as) {
 		printf("%s\n", strerror(EINVAL));
 		return -1;
 	}
@@ -684,10 +682,10 @@ __encode_and_write_frame(const struct Output * const output,
 		return -1;
 	}
 
-	output_frame->nb_samples     = output->codec_ctx->frame_size;
-	output_frame->channel_layout = output->codec_ctx->channel_layout;
-	output_frame->format         = output->codec_ctx->sample_fmt;
-	output_frame->sample_rate    = output->codec_ctx->sample_rate;
+	output_frame->nb_samples     = as->output->codec_ctx->frame_size;
+	output_frame->channel_layout = as->output->codec_ctx->channel_layout;
+	output_frame->format         = as->output->codec_ctx->sample_fmt;
+	output_frame->sample_rate    = as->output->codec_ctx->sample_rate;
 
 	if (av_frame_get_buffer(output_frame, 0) < 0) {
 		printf("unable to allocate output frame buffer\n");
@@ -695,26 +693,30 @@ __encode_and_write_frame(const struct Output * const output,
 		return -1;
 	}
 
-	if (av_audio_fifo_read(af, (void * *) output_frame->data,
-				output->codec_ctx->frame_size) < output->codec_ctx->frame_size) {
+	if (av_audio_fifo_read(as->af, (void * *) output_frame->data,
+				as->output->codec_ctx->frame_size) < as->output->codec_ctx->frame_size) {
 		printf("short read from fifo\n");
 		av_frame_free(&output_frame);
 		return -1;
 	}
 
-	output_frame->pts = *pts;
+	output_frame->pts = as->pts;
 
-	if (*pts > INT64_MAX - output_frame->nb_samples) {
+	if (as->pts > INT64_MAX - output_frame->nb_samples) {
 		printf("overflow\n");
 		av_frame_free(&output_frame);
 		return -1;
 	}
 
-	*pts += output_frame->nb_samples;
+	// PTS can tell us how many seconds we've decoded/encoded. It tells us how
+	// many samples we've processed. Since we know how many samples make up a
+	// second (sample rate is samples per second), we can tell how many seconds
+	// we've output by dividing pts by input->codec_ctx->sample_rate.
+	as->pts += output_frame->nb_samples;
 
 
 	// Send the raw frame to the encoder.
-	const int error = avcodec_send_frame(output->codec_ctx, output_frame);
+	const int error = avcodec_send_frame(as->output->codec_ctx, output_frame);
 	if (error != 0) {
 		printf("avcodec_send_frame failed: %s\n", __get_error_string(error));
 		av_frame_free(&output_frame);
@@ -723,7 +725,7 @@ __encode_and_write_frame(const struct Output * const output,
 
 	av_frame_free(&output_frame);
 
-	return __read_and_write_packet(output);
+	return __read_and_write_packet(as);
 }
 
 // Read an encoded packet from output encoder. Write it out as a packet.
@@ -737,14 +739,19 @@ __encode_and_write_frame(const struct Output * const output,
 // 0 if we need to try again with more frames/samples before we can encode a
 //   packet (EAGAIN) or we're done (EOF).
 static int
-__read_and_write_packet(const struct Output * const output)
+__read_and_write_packet(struct Audiostreamer * const as)
 {
+	if (!as) {
+		printf("%s\n", strerror(EINVAL));
+		return -1;
+	}
+
 	// Read encoded data from the encoder.
 
 	AVPacket output_pkt;
 	memset(&output_pkt, 0, sizeof(AVPacket));
 
-	const int error = avcodec_receive_packet(output->codec_ctx, &output_pkt);
+	const int error = avcodec_receive_packet(as->output->codec_ctx, &output_pkt);
 	if (error != 0) {
 		// We expect that we will not always have enough data to get a fully encoded
 		// frame out.
@@ -766,7 +773,7 @@ __read_and_write_packet(const struct Output * const output)
 	const int sz = output_pkt.size;
 
 	// Write encoded data packet out using av_write_frame().
-	if (av_write_frame(output->format_ctx, &output_pkt) < 0) {
+	if (av_write_frame(as->output->format_ctx, &output_pkt) < 0) {
 		printf("av_write_frame failed\n");
 		av_packet_unref(&output_pkt);
 		return -1;
@@ -801,18 +808,22 @@ __get_error_string(const int error)
 // avcodec_receive_packet() (encoding) repeatedly until we hit
 // AVERROR(EAGAIN).
 static bool
-__drain_codecs(const struct Input * const input,
-		const struct Output * const output, AVAudioFifo * const af)
+__drain_codecs(struct Audiostreamer * const as)
 {
+	if (!as) {
+		printf("%s\n", strerror(EINVAL));
+		return false;
+	}
+
 	// Enter draining mode for decoder.
-	if (avcodec_send_packet(input->codec_ctx, NULL) != 0) {
+	if (avcodec_send_packet(as->input->codec_ctx, NULL) != 0) {
 		printf("send_packet failed (draining mode)\n");
 		return false;
 	}
 
 	// Drain the decoder. All frames/samples end up in the FIFO.
 	while (1) {
-		const int res = __decode_and_store_samples(input, output, af);
+		const int res = __decode_and_store_samples(as->input, as->output, as->af);
 		if (res == -1) {
 			return false;
 		}
@@ -824,13 +835,13 @@ __drain_codecs(const struct Input * const input,
 	}
 
 	// Enter draining mode for encoder.
-	if (avcodec_send_frame(output->codec_ctx, NULL) != 0) {
+	if (avcodec_send_frame(as->output->codec_ctx, NULL) != 0) {
 		printf("send_frame failed (draining mode)\n");
 		return false;
 	}
 
 	while (1) {
-		const int res = __read_and_write_packet(output);
+		const int res = __read_and_write_packet(as);
 		if (res == -1) {
 			return false;
 		}

@@ -123,7 +123,7 @@ func main() {
 
 // getArgs retrieves and validates command line arguments.
 func getArgs() (Args, error) {
-	listenHost := flag.String("host", "localhost", "Host to listen on.")
+	listenHost := flag.String("host", "0.0.0.0", "Host to listen on.")
 	listenPort := flag.Int("port", 8080, "Port to listen on.")
 	format := flag.String("format", "pulse", "Input format. pulse for PulseAudio or mp3 for MP3.")
 	input := flag.String("input", "", "Input URL valid for the given format. For MP3 you can give this as a path to a file. For PulseAudio you can give a value such as alsa_output.pci-0000_00_1f.3.analog-stereo.monitor to take input from a monitor. Use 'pactl list sources' to show the available PulseAudio sources.")
@@ -317,6 +317,8 @@ func encoder(outPipe *os.File, inputFormat, inputURL string,
 			return
 		}
 
+		// We did some work.
+
 		if frameSize > 0 {
 			frameChan <- int(frameSize)
 		}
@@ -344,6 +346,7 @@ func reader(verbose bool, inPipe *os.File, clientChan <-chan Client,
 			}
 
 			clients = append(clients, client)
+
 		case frameSize := <-frameChan:
 			if verbose {
 				//log.Printf("reader: reading new audio frame (%d bytes)", frameSize)
@@ -394,17 +397,33 @@ func sendFrameToClients(clients []Client, frame Frame) []Client {
 	clients2 := []Client{}
 
 	for _, client := range clients {
-		select {
-		case client.Audio <- frame:
-			clients2 = append(clients2, client)
-		case <-client.Done:
-			close(client.Audio)
-		default:
-			close(client.Audio)
+		err := sendFrameToClient(client, frame)
+		if err != nil {
+			continue
 		}
+
+		// Keep it around.
+		clients2 = append(clients2, client)
 	}
 
 	return clients2
+}
+
+// Send a frame to a client. Don't block. If we would block, return an error.
+// This lets us know if we should consider the client dead.
+//
+// Close the client's audio channel if we fail to send so it knows to go away.
+func sendFrameToClient(client Client, frame Frame) error {
+	select {
+	case client.Audio <- frame:
+		return nil
+	case <-client.Done:
+		close(client.Audio)
+		return fmt.Errorf("client went away")
+	default:
+		close(client.Audio)
+		return fmt.Errorf("client is too slow")
+	}
 }
 
 // ServeHTTP handles an HTTP request.
@@ -425,7 +444,7 @@ func (h HTTPHandler) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 func (h HTTPHandler) audioRequest(rw http.ResponseWriter, r *http.Request) {
 	c := Client{
 		// We receive audio data on this channel from the reader.
-		Audio: make(chan Frame, 512),
+		Audio: make(chan Frame, 1024),
 
 		// We close this channel to indicate to reader we're done. This is necessary
 		// if we terminate, otherwise the reader can't know to stop sending us audio.
