@@ -1,9 +1,73 @@
 <!DOCTYPE html>
 <meta charset="utf-8">
 <title>Now playing</title>
+
+<script>
+"use strict";
+
+var np = {};
+
+document.addEventListener('DOMContentLoaded', function() {
+	np.setup_audio();
+}, false);
+
+np.setup_audio = function() {
+	var audio_ele = document.getElementById('audio');
+	if (!audio_ele) {
+		np.log("audio element not found");
+		return;
+	}
+
+	// Try to automatically reconnect.
+
+	// Firefox throws ended if audio retrieval ends unexpectedly.
+	audio_ele.addEventListener('ended', function() {
+		np.log("audio ended");
+		np.wait_then_reconnect(audio_ele);
+	}, false);
+
+	// Chrome throws error if audio retrieval ends unexpectedly.
+	audio_ele.addEventListener('error', function() {
+		np.log("audio error");
+		np.wait_then_reconnect(audio_ele);
+	}, false);
+};
+
+np.wait_then_reconnect = function(audio_ele) {
+	window.setTimeout(function() {
+		// If loading, nothing to do.
+		np.log(audio_ele.networkState);
+		if (audio_ele.networkState == 2) {
+			np.log("connected");
+			return;
+		}
+
+		// Try to reconnect.
+		np.reconnect(audio_ele);
+	}, 5*1000);
+};
+
+np.reconnect = function(audio_ele) {
+	np.log("trying to load");
+
+	// If load fails then we get another error event.
+	audio_ele.load();
+};
+
+np.log = function(msg) {
+	if (!window || !window.console || !window.console.log) {
+		return;
+	}
+
+	window.console.log(msg);
+};
+
+</script>
+
 <h1>Now playing</h1>
 <audio
-	src="http://127.0.0.1:8080/audio?t=1"
+	id="audio"
+	src="https://127.0.0.1:8080/audio"
 	autoplay
 	controls
 	></audio>
