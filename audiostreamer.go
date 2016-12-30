@@ -482,6 +482,12 @@ func (h HTTPHandler) audioRequest(rw http.ResponseWriter, r *http.Request) {
 			break
 		}
 
+		// ResponseWriter buffers chunks. Flush them out asap to reduce time client
+		// waits.
+		if flusher, ok := rw.(http.Flusher); ok {
+			flusher.Flush()
+		}
+
 		if h.Verbose {
 			//log.Printf("%s: Sent %d bytes to client", r.RemoteAddr, n)
 		}
