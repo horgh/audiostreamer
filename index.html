@@ -2,13 +2,20 @@
 <meta charset="utf-8">
 <title>Now playing</title>
 
+<meta name="viewport" content="width=device-width, user-scalable=no">
+
 <script>
 "use strict";
 
 var np = {};
 
+// Song tracker API endpoint. We use this to retrieve what track is playing.
+np.song_tracker_url = "https:///~a/music/api.php?user=cd&last=1&format=json";
+
 document.addEventListener('DOMContentLoaded', function() {
 	np.setup_audio();
+
+	np.retrieve_playing_track();
 }, false);
 
 np.setup_audio = function() {
@@ -22,13 +29,11 @@ np.setup_audio = function() {
 
 	// Firefox throws ended if audio retrieval ends unexpectedly.
 	audio_ele.addEventListener('ended', function() {
-		np.log("audio ended");
 		np.wait_then_reconnect(audio_ele);
 	}, false);
 
 	// Chrome throws error if audio retrieval ends unexpectedly.
 	audio_ele.addEventListener('error', function() {
-		np.log("audio error");
 		np.wait_then_reconnect(audio_ele);
 	}, false);
 };
@@ -36,9 +41,7 @@ np.setup_audio = function() {
 np.wait_then_reconnect = function(audio_ele) {
 	window.setTimeout(function() {
 		// If loading, nothing to do.
-		np.log(audio_ele.networkState);
 		if (audio_ele.networkState == 2) {
-			np.log("connected");
 			return;
 		}
 
@@ -48,10 +51,43 @@ np.wait_then_reconnect = function(audio_ele) {
 };
 
 np.reconnect = function(audio_ele) {
-	np.log("trying to load");
-
 	// If load fails then we get another error event.
 	audio_ele.load();
+};
+
+// Retrieve the currently playing track from song tracker.
+np.retrieve_playing_track = function() {
+	var req = new XMLHttpRequest();
+
+	req.addEventListener('load', function() {
+		np.display_track_info(req.response);
+	});
+
+	req.open("GET", np.song_tracker_url);
+
+	req.responseType = "json";
+
+	req.send();
+
+	window.setTimeout(function() {
+		np.retrieve_playing_track();
+	}, 30*1000);
+};
+
+// Take object from song tracker API now playing request, and show the track
+// information on the page.
+np.display_track_info = function(track_info) {
+	var track_info_ele = document.getElementById('track-info');
+	if (!track_info_ele) {
+		np.log("track info element not found");
+		return;
+	}
+
+	var track_text = 'Current track: ' + track_info.artist + ' - ' +
+		track_info.album + ' - ' + track_info.title;
+
+	track_info_ele.textContent = track_text;
+	np.log("set track info to " + track_text);
 };
 
 np.log = function(msg) {
@@ -64,10 +100,19 @@ np.log = function(msg) {
 
 </script>
 
+<style>
+#track-info {
+	margin: 10px 0 15px 0;
+}
+</style>
+
 <h1>Now playing</h1>
+
+<div id="track-info"></div>
+
 <audio
 	id="audio"
-	src="https://127.0.0.1:8080/audio"
+	src="https:///audio"
 	autoplay
 	controls
 	></audio>
