@@ -15,7 +15,9 @@ np.song_tracker_url = "https:///~a/music/api.php?user=cd&last=1&format=json";
 document.addEventListener('DOMContentLoaded', function() {
 	np.setup_audio();
 
-	np.retrieve_playing_track();
+	if (np.song_tracker_url.length > 0) {
+		np.retrieve_playing_track();
+	}
 }, false);
 
 np.setup_audio = function() {
